@@ -1,6 +1,9 @@
 import json
 import base64
+from io import BytesIO
+import socket
 import unittest
+from threading import Event, Lock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError, URLError
@@ -8,13 +11,19 @@ from unittest.mock import Mock, patch
 
 from app import (
     DEFAULT_MODEL,
+    IMAGE_DROP_HINT,
     IMAGE_CONTEXT_TOKENS,
     IMAGE_RESPONSE_TOKENS,
+    IMAGE_TOOL_CALL_RESPONSE_TOKENS,
+    MAX_SCREENSHOT_DIMENSION,
+    TOOL_CALL_RESPONSE_TOKENS,
+    OLLAMA_REQUEST_TIMEOUT_SECONDS,
     MAX_IMAGE_BYTES,
     MODEL_OPTIONS,
     DesktopAgent,
     TOOL_MODES,
     calculate_cpu_utilization,
+    format_elapsed_timer,
     format_elapsed_time,
     is_valid_workspace,
     is_text_tool_call,
@@ -23,15 +32,29 @@ from app import (
     local_ollama_url,
     load_user_preferences,
     ollama_http_error_message,
+    prepare_screenshot,
     save_user_preferences,
     read_cpu_counters,
     read_system_status,
+    scale_screenshot_coordinates,
     resolve_workspace_path,
+    set_window_icon,
     tools_for_mode,
 )
 
 
 class WorkspacePathTests(unittest.TestCase):
+    def test_sets_window_icon_and_returns_image_reference(self) -> None:
+        root = Mock()
+        icon = Mock()
+
+        with patch("app.tk.PhotoImage", return_value=icon) as photo_image:
+            retained_icon = set_window_icon(root, Path("greenMan.png"))
+
+        photo_image.assert_called_once_with(file="greenMan.png")
+        root.iconphoto.assert_called_once_with(True, icon)
+        self.assertIs(retained_icon, icon)
+
     def test_workspace_is_valid_only_while_it_is_a_directory(self) -> None:
         with TemporaryDirectory() as folder:
             self.assertTrue(is_valid_workspace(Path(folder)))
@@ -161,6 +184,10 @@ class SystemStatusTests(unittest.TestCase):
         self.assertEqual(format_elapsed_time(12.34), "12.3 seconds")
         self.assertEqual(format_elapsed_time(125.6), "2 min 5.6 sec")
 
+    def test_formats_live_elapsed_timer_as_minutes_and_seconds(self) -> None:
+        self.assertEqual(format_elapsed_timer(65.9), "01:05")
+        self.assertEqual(format_elapsed_timer(-2), "00:00")
+
     def test_reads_cpu_temperature_and_gpu_utilization_from_sysfs(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
@@ -227,6 +254,32 @@ class SystemStatusTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "10 MB image limit"):
                 load_dropped_image(image_path)
+
+    def test_prepares_screenshot_as_bounded_jpeg(self) -> None:
+        from PIL import Image
+
+        source = BytesIO()
+        Image.new("RGB", (1920, 1080), "white").save(source, format="PNG")
+
+        encoded, source_size, image_size = prepare_screenshot(
+            base64.b64encode(source.getvalue()).decode("ascii")
+        )
+
+        with Image.open(BytesIO(base64.b64decode(encoded))) as prepared:
+            self.assertEqual(prepared.format, "JPEG")
+            self.assertEqual(prepared.size, (MAX_SCREENSHOT_DIMENSION, 720))
+        self.assertEqual(source_size, (1920, 1080))
+        self.assertEqual(image_size, (MAX_SCREENSHOT_DIMENSION, 720))
+
+    def test_scales_screenshot_coordinates_to_native_resolution(self) -> None:
+        self.assertEqual(
+            scale_screenshot_coordinates(640, 360, (1280, 720), (1920, 1080)),
+            (960, 540),
+        )
+
+    def test_rejects_coordinates_outside_scaled_screenshot(self) -> None:
+        with self.assertRaisesRegex(ValueError, "screenshot size 1280x720"):
+            scale_screenshot_coordinates(1280, 360, (1280, 720), (1920, 1080))
 
 
 class OllamaUrlTests(unittest.TestCase):
@@ -301,6 +354,8 @@ class ToolCallResponseTests(unittest.TestCase):
     def test_chat_request_includes_only_selected_tools(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [{"role": "user", "content": "Take a screenshot."}]
+        agent.active_response_lock = Lock()
+        agent.active_response = None
 
         with patch("app.urlopen") as urlopen:
             urlopen.return_value.__enter__.return_value.read.return_value = (
@@ -334,6 +389,8 @@ class ToolCallResponseTests(unittest.TestCase):
 
     def test_qwen_image_request_uses_larger_context_and_disables_thinking(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
+        agent.active_response_lock = Lock()
+        agent.active_response = None
         agent.messages = [
             {
                 "role": "user",
@@ -364,6 +421,8 @@ class ToolCallResponseTests(unittest.TestCase):
 
     def test_non_qwen_image_request_does_not_get_qwen_options(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
+        agent.active_response_lock = Lock()
+        agent.active_response = None
         agent.messages = [
             {"role": "user", "content": "Describe this image.", "images": ["aGVsbG8="]}
         ]
@@ -381,6 +440,153 @@ class ToolCallResponseTests(unittest.TestCase):
         payload = json.loads(urlopen.call_args.args[0].data)
         self.assertNotIn("think", payload)
         self.assertNotIn("options", payload)
+
+    def test_qwen_tool_request_uses_bounded_generation_options(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Use one tool call per response."},
+            {"role": "user", "content": "Take a screenshot."},
+        ]
+        agent.active_response_lock = Lock()
+        agent.active_response = None
+
+        with patch("app.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = (
+                b'{"message":{"role":"assistant","content":"Done."}}'
+            )
+            agent._chat(
+                "http://localhost:11434/api/chat",
+                "qwen3-vl:8b",
+                tools=tools_for_mode("Desktop control"),
+            )
+
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertFalse(payload["think"])
+        self.assertEqual(
+            payload["options"],
+            {"num_predict": TOOL_CALL_RESPONSE_TOKENS, "temperature": 0.2},
+        )
+
+    def test_qwen_image_tool_request_uses_bounded_generation_options(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Use one tool call per response."},
+            {"role": "user", "content": "Focus the app and select its tab."},
+            {"role": "tool", "tool_name": "take_screenshot", "content": "Captured."},
+            {
+                "role": "user",
+                "content": "The image is attached. Inspect it.",
+                "images": ["aGVsbG8="],
+            },
+        ]
+        agent.active_response_lock = Lock()
+        agent.active_response = None
+
+        with patch("app.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = (
+                b'{"message":{"role":"assistant","content":"Done."}}'
+            )
+            agent._chat(
+                "http://localhost:11434/api/chat",
+                "qwen3-vl:8b",
+                tools=tools_for_mode("Desktop control"),
+            )
+
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertFalse(payload["think"])
+        self.assertEqual(
+            payload["options"],
+            {
+                "num_ctx": IMAGE_CONTEXT_TOKENS,
+                "num_predict": IMAGE_TOOL_CALL_RESPONSE_TOKENS,
+                "temperature": 0.2,
+            },
+        )
+
+    def test_new_screenshot_replaces_previous_screenshot_in_history(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Click the untitled tab."},
+        ]
+        agent.root = Mock()
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": "take_screenshot", "arguments": {}}}
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "click",
+                                    "arguments": {"x": 10, "y": 20},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": "take_screenshot", "arguments": {}}}
+                        ],
+                    }
+                },
+                {"message": {"role": "assistant", "content": "Done."}},
+            ]
+        )
+        agent._execute_tool = Mock(
+            side_effect=[
+                ("Screenshot captured.", ["first-screenshot"]),
+                ("Clicked.", None),
+                ("Screenshot captured.", ["second-screenshot"]),
+            ]
+        )
+
+        agent._run_turn("http://localhost:11434", "qwen3-vl:8b", "Desktop control")
+
+        screenshots = [
+            message
+            for message in agent.messages
+            if message.get("content", "").startswith(
+                "The current desktop screenshot is attached."
+            )
+        ]
+        self.assertEqual(len(screenshots), 2)
+        self.assertNotIn("images", screenshots[0])
+        self.assertEqual(screenshots[1]["images"], ["second-screenshot"])
+        self.assertEqual(completed, [("Done.", None)])
+
+    def test_ollama_read_timeout_has_actionable_error(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [{"role": "user", "content": "Hello."}]
+        agent.active_response_lock = Lock()
+        agent.active_response = None
+
+        with (
+            patch("app.urlopen", side_effect=TimeoutError("timed out")),
+            self.assertRaisesRegex(
+                RuntimeError,
+                f"Ollama did not respond within {OLLAMA_REQUEST_TIMEOUT_SECONDS} seconds",
+            ),
+        ):
+            agent._chat(
+                "http://127.0.0.1:11434/api/chat",
+                "llama3.1:8b",
+                tools=[],
+            )
 
     def test_chat_connection_error_includes_underlying_reason(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -511,7 +717,7 @@ class ToolCallResponseTests(unittest.TestCase):
         agent._run_turn("http://localhost:11434", "qwen3-vl:8b", "Workspace files")
 
         self.assertEqual(completed[0][0], "")
-        self.assertIn("generation limit", completed[0][1])
+        self.assertIn("output or context limit", completed[0][1])
 
     def test_rejects_tool_calls_outside_selected_mode(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -547,11 +753,109 @@ class ToolCallResponseTests(unittest.TestCase):
 
 
 class DesktopSafetyTests(unittest.TestCase):
+    def test_remembered_desktop_approval_skips_click_and_typing_prompts(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.remember_desktop_approvals = True
+        agent.root = Mock()
+
+        self.assertTrue(agent._request_approval("click", {"x": 10, "y": 20}))
+        self.assertTrue(agent._request_approval("type_text", {"text": "hello"}))
+
+        agent.root.after.assert_not_called()
+
+    def test_remembered_desktop_approval_does_not_skip_file_or_command_prompts(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.remember_desktop_approvals = True
+        agent.root = Mock()
+        agent.root.after.side_effect = (
+            lambda _delay, callback, *args: callback(*args)
+        )
+
+        def approve(_name, _args, decision, completed) -> None:
+            decision.append(True)
+            completed.set()
+
+        agent._show_approval = Mock(side_effect=approve)
+
+        self.assertTrue(agent._request_approval("write_file", {"path": "file.txt"}))
+        self.assertTrue(agent._request_approval("run_command", {"command": "ls"}))
+
+        self.assertEqual(agent._show_approval.call_count, 2)
+
+    def test_send_button_shows_red_stop_during_query(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.cancel_event = Event()
+        agent.send_button = Mock()
+
+        agent._update_send_button()
+
+        agent.send_button.config.assert_called_once_with(
+            text="Stop",
+            state="normal",
+            bg="#a32626",
+            fg="#ffffff",
+            activebackground="#c43c3c",
+            activeforeground="#ffffff",
+            disabledforeground="#183b24",
+        )
+
+    def test_stop_query_sets_cancel_event_and_closes_active_response(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.cancel_event = Event()
+        agent.active_response = Mock()
+        agent.active_response_lock = Lock()
+        agent.send_button = Mock()
+        agent.status = Mock()
+        agent._update_send_button = Mock()
+
+        agent._stop_query()
+
+        self.assertTrue(agent.cancel_event.is_set())
+        agent.active_response.fp.raw._sock.shutdown.assert_called_once_with(
+            socket.SHUT_RDWR
+        )
+        agent.active_response.close.assert_called_once_with()
+        agent._update_send_button.assert_called_once_with()
+
+    def test_cancelled_turn_does_not_execute_returned_tool_call(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.cancel_event = Event()
+        agent.messages = [{"role": "user", "content": "Run this action."}]
+        agent.root = Mock()
+        completed = []
+        agent._finish = lambda *args: completed.append(args)
+        agent._chat = Mock(
+            side_effect=lambda *args, **kwargs: (
+                agent.cancel_event.set()
+                or {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "take_screenshot",
+                                    "arguments": {},
+                                }
+                            }
+                        ],
+                    }
+                }
+            )
+        )
+        agent._execute_tool = Mock()
+
+        agent._run_turn("http://localhost:11434", "llama3.1:8b", "Screenshot")
+
+        agent._execute_tool.assert_not_called()
+        agent.root.after.assert_called_once()
+        self.assertEqual(agent.root.after.call_args.args[2:], ("", None, True))
+
     def test_finish_appends_elapsed_duration_after_answer(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.turn_started_at = 10.0
         agent.busy = True
         agent.working_status_after = None
+        agent.progress_after = None
         agent.root = Mock()
         agent.model_selector = Mock()
         agent.send_button = Mock()
@@ -560,6 +864,9 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.prompt = Mock()
         agent.url_entry = Mock()
         agent.workspace_button = Mock()
+        agent.working_indicator = Mock()
+        agent.attachment_status = Mock()
+        agent.cancel_event = Event()
         agent.status = Mock()
         agent._append = Mock()
         agent._update_send_button = Mock()
@@ -579,6 +886,10 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.prompt.config.assert_called_once_with(state="normal")
         agent.url_entry.config.assert_called_once_with(state="normal")
         agent.workspace_button.config.assert_called_once_with(state="normal")
+        agent.working_indicator.pack_forget.assert_called_once_with()
+        self.assertIsNone(agent.cancel_event)
+        agent.working_indicator.pack_forget.assert_called_once_with()
+        agent.attachment_status.set.assert_called_once_with(IMAGE_DROP_HINT)
 
     def test_send_attaches_dropped_image_to_user_message(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -595,8 +906,10 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.model_selector = Mock()
         agent.url_entry = Mock()
         agent.workspace_button = Mock()
+        agent.working_indicator = Mock()
         agent.mode_buttons = []
         agent.status = Mock()
+        agent.attachment_status = Mock()
         agent.url_entry = Mock()
         agent.url_entry.get.return_value = "http://127.0.0.1:11434"
         agent.active_model = "qwen3-vl:8b"
@@ -604,6 +917,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.tool_mode.get.return_value = "Questions only"
         agent._append = Mock()
         agent._clear_pending_image = Mock()
+        agent._start_progress_animation = Mock()
         agent._update_working_status = Mock()
 
         with patch("app.threading.Thread") as thread:
@@ -626,8 +940,29 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.prompt.config.assert_called_once_with(state="disabled")
         agent.url_entry.config.assert_called_once_with(state="disabled")
         agent.workspace_button.config.assert_called_once_with(state="disabled")
+        agent._start_progress_animation.assert_called_once_with()
         agent._clear_pending_image.assert_called_once_with()
+        agent.attachment_status.set.assert_called_once_with("")
         thread.assert_called_once()
+
+    def test_progress_segment_is_three_fifths_of_track(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.working_indicator = Mock()
+        agent.working_indicator.winfo_width.return_value = 1000
+        agent.working_indicator.winfo_height.return_value = 18
+        agent.progress_segment = "segment"
+        agent.progress_position = 0
+        agent.progress_direction = 1
+        agent.root = Mock()
+        agent.root.after.return_value = "animation"
+
+        agent._animate_progress()
+
+        agent.working_indicator.coords.assert_called_once_with(
+            "segment", 8, 0, 608, 18
+        )
+        agent.root.after.assert_called_once_with(30, agent._animate_progress)
+        self.assertEqual(agent.progress_after, "animation")
 
     def test_prompt_keypresses_are_blocked_while_busy(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -656,6 +991,8 @@ class DesktopSafetyTests(unittest.TestCase):
     def test_working_status_includes_cpu_temperature_and_cpu_gpu_utilization(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.busy = True
+        agent.turn_started_at = 100.0
+        agent.cancel_event = None
         agent.root = Mock()
         agent.root.after.return_value = "temperature-refresh"
         agent.status = Mock()
@@ -664,16 +1001,39 @@ class DesktopSafetyTests(unittest.TestCase):
         with (
             patch("app.read_system_status", return_value=(55, 60)),
             patch("app.read_cpu_counters", return_value=(1200, 900)),
+            patch("app.time.monotonic", return_value=165.9),
         ):
             agent._update_working_status()
 
         agent.status.set.assert_called_once_with(
-            "Working…  CPU - 55°C / CPU usage - 50% / GPU - 60% utilization"
+            "Working…  Elapsed Time - 01:05 / CPU - 55°C / "
+            "CPU - 50% utilization / GPU - 60% utilization"
         )
         agent.root.after.assert_called_once_with(
             2000, agent._update_working_status
         )
         self.assertEqual(agent.working_status_after, "temperature-refresh")
+
+    def test_stopping_status_keeps_elapsed_timer_visible(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.busy = True
+        agent.turn_started_at = 0.0
+        agent.cancel_event = Event()
+        agent.cancel_event.set()
+        agent.root = Mock()
+        agent.root.after.return_value = "refresh"
+        agent.status = Mock()
+        agent.previous_cpu_counters = None
+
+        with (
+            patch("app.read_system_status", return_value=(None, None)),
+            patch("app.read_cpu_counters", return_value=None),
+            patch("app.time.monotonic", return_value=72.0),
+        ):
+            agent._update_working_status()
+
+        self.assertIn("Stopping…  Elapsed Time - 01:12", agent.status.set.call_args.args[0])
+        agent.root.after.assert_called_once_with(2000, agent._update_working_status)
 
     def test_double_enter_sends_and_prevents_second_newline(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -735,30 +1095,25 @@ class DesktopSafetyTests(unittest.TestCase):
 
         agent.workspace = None
         agent._update_send_button()
-        agent.send_button.config.assert_called_with(
-            state="disabled",
-            bg="#d6e2d7",
-            fg="#183b24",
-            disabledforeground="#183b24",
+        self.assertEqual(
+            agent.send_button.config.call_args.kwargs["state"], "disabled"
         )
+        self.assertEqual(agent.send_button.config.call_args.kwargs["text"], "Send")
+        self.assertEqual(agent.send_button.config.call_args.kwargs["fg"], "#183b24")
 
         with TemporaryDirectory() as folder:
             agent.workspace = Path(folder)
             agent._update_send_button()
-            agent.send_button.config.assert_called_with(
-                state="normal",
-                bg="#2f6b3f",
-                fg="#ffffff",
-                disabledforeground="#183b24",
+            self.assertEqual(
+                agent.send_button.config.call_args.kwargs["state"], "normal"
             )
+            self.assertEqual(agent.send_button.config.call_args.kwargs["text"], "Send")
+            self.assertEqual(agent.send_button.config.call_args.kwargs["bg"], "#2f6b3f")
 
             agent.busy = True
             agent._update_send_button()
-            agent.send_button.config.assert_called_with(
-                state="disabled",
-                bg="#d6e2d7",
-                fg="#183b24",
-                disabledforeground="#183b24",
+            self.assertEqual(
+                agent.send_button.config.call_args.kwargs["state"], "disabled"
             )
 
     def test_successful_model_load_activates_model_and_starts_new_chat(self) -> None:

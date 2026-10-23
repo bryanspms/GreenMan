@@ -4,6 +4,59 @@ A small Linux desktop app that connects to a local Ollama server and can inspect
 the screen, interact with desktop applications, read and write files in a chosen
 folder, and run shell commands.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    User[User]
+    subgraph App["Green Man desktop app"]
+        UI["Tkinter UI<br/>app.py"]
+        Turn["Query worker<br/>tool loop and cancellation"]
+        Guard["Mode and safety checks<br/>approval dialogs"]
+        Workspace["Workspace tools<br/>list, read, write, view image"]
+        Desktop["Desktop tools<br/>screenshot, click, type"]
+        Image["Screenshot preparation<br/>resize and coordinate scaling"]
+        Prefs["Local preferences"]
+        Status["Progress and system status"]
+        Wayland["Wayland portal adapter<br/>wayland_portal.py"]
+    end
+    Ollama["Local Ollama API<br/>/api/chat and model loading"]
+    Files["Selected workspace"]
+    Portal["XDG Desktop Portal"]
+    PipeWire["PipeWire / GStreamer"]
+    LinuxDesktop["Linux desktop session<br/>X11 or Wayland"]
+    Sensors["Linux CPU/GPU metrics"]
+
+    User --> UI
+    UI --> Turn
+    UI <--> Prefs
+    UI --> Status
+    Sensors --> Status
+    Turn <--> Ollama
+    Turn --> Guard
+    Guard --> Workspace
+    Guard --> Desktop
+    Workspace <--> Files
+    Desktop --> Image
+    Image --> Turn
+    Desktop --> LinuxDesktop
+    Desktop --> Wayland
+    Wayland <--> Portal
+    Wayland <--> PipeWire
+    Portal <--> LinuxDesktop
+    PipeWire --> Wayland
+```
+
+The UI starts each query on a worker thread and sends the conversation to the
+local Ollama API. Any tool request is checked against the selected assistant
+mode; actions that can change the desktop or files wait for user approval.
+Workspace tools are confined to the selected folder. Desktop screenshots are
+prepared before being sent back to the model, and click coordinates are mapped
+from the prepared image to the original screen size. On Wayland, desktop access
+uses the XDG Desktop Portal and PipeWire; on other Linux sessions, the app uses
+PyAutoGUI. Preferences stay local to the app, and CPU/GPU readings feed the
+working status line.
+
 ## Requirements
 
 - Python 3.10 or newer with Tkinter
@@ -32,6 +85,9 @@ ollama pull qwen3-vl:8b
 ```
 
 The app window uses a green theme with light backgrounds and readable text.
+The window icon is loaded from `greenMan.png` in the project directory. Desktop
+environments that hide icons in window decorations still show the logo in the
+app header.
 
 Choose either model from the **Ollama model** dropdown. Changing the selection
 loads the chosen model into Ollama; once loaded, it is used for new requests and
@@ -57,6 +113,12 @@ and GPU utilization. CPU utilization is calculated from Linux `/proc/stat`
 counters, so it appears after the second status update. NVIDIA GPU utilization
 is read with `nvidia-smi`; AMD/Intel utilization is read from Linux sysfs when
 exposed by the driver. Unavailable readings are shown as `N/A`.
+An animated green progress indicator appears while the assistant is processing
+and stops when the response completes. During a query, the Send button becomes
+a red **Stop** button; using it closes the active Ollama response and prevents
+further tool actions for that query.
+Qwen tool requests use a shorter generation budget to reduce delays before
+desktop and workspace actions; image-analysis requests retain a larger budget.
 
 When a query or task finishes, its elapsed time is added to the conversation
 history, including time spent on tool actions and approvals.
@@ -83,8 +145,11 @@ screen before clicking or typing.
 ## Safety and privacy
 
 - Typing, clicking, writing files, and running shell commands each show the
-  exact proposed arguments in a confirmation dialog. Denying an action prevents
-  it from running.
+  exact proposed arguments in a confirmation dialog. In a click or typing
+  confirmation, select **Remember my approval for desktop actions until the app
+  closes** to skip later desktop-action prompts for the rest of this app run.
+  This does not apply to file writes or shell commands, which continue to ask
+  for approval every time. Denying an action prevents it from running.
 - File reads and writes are limited to the selected workspace. Reads are capped
   at 1 MB; writes do not create missing parent directories.
 - Commands run in the selected workspace (or your home folder if none is
