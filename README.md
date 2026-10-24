@@ -117,6 +117,15 @@ python3 -m unittest
 
 Contributions are welcome. Please open a pull request with a clear explanation of the change and its purpose.
 
-## License
 
-This project is provided as-is for personal and research use. Please review the repository and applicable licensing details before reusing it in production or distributed environments.
+## License
+Green Man is licensed under the MIT License.
+
+You are free to use, modify, distribute, and incorporate portions of the project for both commercial and non-commercial purposes, provided proper attribution is maintained and the original copyright notice is preserved.
+
+Copyright (c) 2026 Bryan Price
+
+
+## Attribution
+
+If you build upon LifeForm, attribution is appreciated: "Based on Green Man(github.com/bryanspms/GreenMan) by Bryan Price"
