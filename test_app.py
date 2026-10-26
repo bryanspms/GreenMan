@@ -2,6 +2,8 @@ import json
 import base64
 from io import BytesIO
 import socket
+import subprocess
+import sys
 import unittest
 from threading import Event, Lock
 from pathlib import Path
@@ -20,6 +22,7 @@ from app import (
     OLLAMA_REQUEST_TIMEOUT_SECONDS,
     MAX_IMAGE_BYTES,
     MODEL_OPTIONS,
+    SYSTEM_PROMPT,
     DesktopAgent,
     TOOL_MODES,
     calculate_cpu_utilization,
@@ -31,8 +34,10 @@ from app import (
     load_ollama_model,
     local_ollama_url,
     load_user_preferences,
+    list_piper_voice_models,
     ollama_http_error_message,
     prepare_screenshot,
+    piper_voice_directory,
     save_user_preferences,
     read_cpu_counters,
     read_system_status,
@@ -40,10 +45,49 @@ from app import (
     resolve_workspace_path,
     set_window_icon,
     tools_for_mode,
+    vosk_model_path,
 )
 
 
 class WorkspacePathTests(unittest.TestCase):
+    def test_lists_piper_voice_models_in_filename_order(self) -> None:
+        with TemporaryDirectory() as folder:
+            directory = Path(folder)
+            second_voice = directory / "en_US-zeta.onnx"
+            first_voice = directory / "en_US-alpha.onnx"
+            first_voice.touch()
+            second_voice.touch()
+            (directory / "not-a-model.json").touch()
+            (directory / "folder.onnx").mkdir()
+
+            models, error = list_piper_voice_models(directory)
+
+        self.assertEqual(models, [first_voice, second_voice])
+        self.assertIsNone(error)
+
+    def test_missing_piper_voice_directory_has_no_models_or_error(self) -> None:
+        with TemporaryDirectory() as folder:
+            models, error = list_piper_voice_models(Path(folder) / "missing")
+
+        self.assertEqual(models, [])
+        self.assertIsNone(error)
+
+    def test_piper_voice_directory_uses_xdg_data_home(self) -> None:
+        with TemporaryDirectory() as folder:
+            with patch.dict("os.environ", {"XDG_DATA_HOME": folder}):
+                directory = piper_voice_directory()
+
+        self.assertEqual(directory, Path(folder) / "piper-voices")
+
+    def test_vosk_model_path_uses_xdg_data_home(self) -> None:
+        with TemporaryDirectory() as folder:
+            with patch.dict("os.environ", {"XDG_DATA_HOME": folder}):
+                model = vosk_model_path()
+
+        self.assertEqual(
+            model, Path(folder) / "vosk-model-small-en-us-0.15"
+        )
+
     def test_sets_window_icon_and_returns_image_reference(self) -> None:
         root = Mock()
         icon = Mock()
@@ -76,12 +120,18 @@ class WorkspacePathTests(unittest.TestCase):
                 restored_workspace,
                 restored_mode,
                 restored_model,
+                voice_enabled,
+                voice_model,
+                system_prompt,
                 error,
             ) = load_user_preferences(preferences_file)
 
         self.assertEqual(restored_workspace, workspace)
         self.assertEqual(restored_mode, "Workspace files")
         self.assertEqual(restored_model, DEFAULT_MODEL)
+        self.assertFalse(voice_enabled)
+        self.assertIsNone(voice_model)
+        self.assertEqual(system_prompt, SYSTEM_PROMPT)
         self.assertIsNone(error)
 
     def test_preferences_ignore_a_workspace_that_no_longer_exists(self) -> None:
@@ -98,11 +148,22 @@ class WorkspacePathTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            workspace, mode, model, error = load_user_preferences(preferences_file)
+            (
+                workspace,
+                mode,
+                model,
+                voice_enabled,
+                voice_model,
+                system_prompt,
+                error,
+            ) = load_user_preferences(preferences_file)
 
         self.assertIsNone(workspace)
         self.assertEqual(mode, "Screenshot")
         self.assertEqual(model, DEFAULT_MODEL)
+        self.assertFalse(voice_enabled)
+        self.assertIsNone(voice_model)
+        self.assertEqual(system_prompt, SYSTEM_PROMPT)
         self.assertIsNone(error)
 
     def test_preferences_default_to_questions_for_unknown_mode(self) -> None:
@@ -113,11 +174,22 @@ class WorkspacePathTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            workspace, mode, model, error = load_user_preferences(preferences_file)
+            (
+                workspace,
+                mode,
+                model,
+                voice_enabled,
+                voice_model,
+                system_prompt,
+                error,
+            ) = load_user_preferences(preferences_file)
 
         self.assertIsNone(workspace)
         self.assertEqual(mode, "Questions only")
         self.assertEqual(model, DEFAULT_MODEL)
+        self.assertFalse(voice_enabled)
+        self.assertIsNone(voice_model)
+        self.assertEqual(system_prompt, SYSTEM_PROMPT)
         self.assertIsNone(error)
 
     def test_preferences_restore_selected_model(self) -> None:
@@ -133,13 +205,119 @@ class WorkspacePathTests(unittest.TestCase):
                 )
             )
 
-            restored_workspace, mode, model, error = load_user_preferences(
-                preferences_file
-            )
+            (
+                restored_workspace,
+                mode,
+                model,
+                voice_enabled,
+                voice_model,
+                system_prompt,
+                error,
+            ) = load_user_preferences(preferences_file)
 
         self.assertEqual(restored_workspace, workspace)
         self.assertEqual(mode, "Screenshot")
         self.assertEqual(model, "qwen3-vl:8b")
+        self.assertFalse(voice_enabled)
+        self.assertIsNone(voice_model)
+        self.assertEqual(system_prompt, SYSTEM_PROMPT)
+        self.assertIsNone(error)
+
+    def test_preferences_restore_voice_enabled(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            preferences_file = root / "preferences.json"
+
+            self.assertIsNone(
+                save_user_preferences(
+                    preferences_file,
+                    None,
+                    "Questions only",
+                    voice_enabled=True,
+                )
+            )
+
+            (
+                workspace,
+                mode,
+                model,
+                voice_enabled,
+                voice_model,
+                system_prompt,
+                error,
+            ) = load_user_preferences(preferences_file)
+
+        self.assertIsNone(workspace)
+        self.assertEqual(mode, "Questions only")
+        self.assertEqual(model, DEFAULT_MODEL)
+        self.assertTrue(voice_enabled)
+        self.assertIsNone(voice_model)
+        self.assertEqual(system_prompt, SYSTEM_PROMPT)
+        self.assertIsNone(error)
+
+    def test_preferences_restore_piper_voice_model(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            preferences_file = root / "preferences.json"
+            voice_model = root / "voice.onnx"
+
+            self.assertIsNone(
+                save_user_preferences(
+                    preferences_file,
+                    None,
+                    "Questions only",
+                    voice_model=voice_model,
+                )
+            )
+
+            (
+                workspace,
+                mode,
+                model,
+                voice_enabled,
+                restored_voice_model,
+                system_prompt,
+                error,
+            ) = load_user_preferences(preferences_file)
+
+        self.assertIsNone(workspace)
+        self.assertEqual(mode, "Questions only")
+        self.assertEqual(model, DEFAULT_MODEL)
+        self.assertFalse(voice_enabled)
+        self.assertEqual(restored_voice_model, voice_model)
+        self.assertEqual(system_prompt, SYSTEM_PROMPT)
+        self.assertIsNone(error)
+
+    def test_preferences_restore_custom_system_prompt(self) -> None:
+        with TemporaryDirectory() as folder:
+            preferences_file = Path(folder) / "preferences.json"
+            custom_prompt = "You are a concise gardening assistant."
+
+            self.assertIsNone(
+                save_user_preferences(
+                    preferences_file,
+                    None,
+                    "Questions only",
+                    system_prompt=custom_prompt,
+                )
+            )
+
+            (
+                workspace,
+                mode,
+                model,
+                voice_enabled,
+                voice_model,
+                restored_prompt,
+                error,
+            ) = load_user_preferences(preferences_file)
+
+        self.assertIsNone(workspace)
+        self.assertEqual(mode, "Questions only")
+        self.assertEqual(model, DEFAULT_MODEL)
+        self.assertFalse(voice_enabled)
+        self.assertIsNone(voice_model)
+        self.assertEqual(restored_prompt, custom_prompt)
         self.assertIsNone(error)
 
     def test_resolves_path_inside_workspace(self) -> None:
@@ -753,6 +931,44 @@ class ToolCallResponseTests(unittest.TestCase):
 
 
 class DesktopSafetyTests(unittest.TestCase):
+    def test_window_fits_requested_content_without_exceeding_screen(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.root = Mock()
+        agent.root.winfo_reqwidth.return_value = 960
+        agent.root.winfo_reqheight.return_value = 880
+        agent.root.winfo_screenwidth.return_value = 1920
+        agent.root.winfo_screenheight.return_value = 1080
+
+        agent._fit_window_to_content()
+
+        agent.root.update_idletasks.assert_called_once_with()
+        agent.root.geometry.assert_called_once_with("960x880")
+
+    def test_window_fit_is_clamped_to_available_screen_size(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.root = Mock()
+        agent.root.winfo_reqwidth.return_value = 1600
+        agent.root.winfo_reqheight.return_value = 1200
+        agent.root.winfo_screenwidth.return_value = 1366
+        agent.root.winfo_screenheight.return_value = 768
+
+        agent._fit_window_to_content()
+
+        agent.root.geometry.assert_called_once_with("1286x688")
+
+    def test_system_prompt_dialog_fits_its_requested_content(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        dialog = Mock()
+        dialog.winfo_reqwidth.return_value = 840
+        dialog.winfo_reqheight.return_value = 530
+        dialog.winfo_screenwidth.return_value = 1920
+        dialog.winfo_screenheight.return_value = 1080
+
+        agent._fit_window_to_content(dialog, minimum_size=(720, 480))
+
+        dialog.update_idletasks.assert_called_once_with()
+        dialog.geometry.assert_called_once_with("840x530")
+
     def test_remembered_desktop_approval_skips_click_and_typing_prompts(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.remember_desktop_approvals = True
@@ -890,6 +1106,174 @@ class DesktopSafetyTests(unittest.TestCase):
         self.assertIsNone(agent.cancel_event)
         agent.working_indicator.pack_forget.assert_called_once_with()
         agent.attachment_status.set.assert_called_once_with(IMAGE_DROP_HINT)
+
+    def test_speech_response_is_sent_to_local_speech_engine(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.speech_process = None
+        agent.speech_process_lock = Lock()
+        cancel_event = Event()
+        agent.speech_cancel_event = cancel_event
+        process = Mock(returncode=0)
+
+        with (
+            patch("app.shutil.which", return_value="/usr/bin/espeak-ng"),
+            patch("app.subprocess.Popen", return_value=process) as popen,
+        ):
+            agent._speak_response("Hello there.", cancel_event)
+
+        popen.assert_called_once_with(
+            ["/usr/bin/espeak-ng", "--stdin"],
+            stdin=subprocess.PIPE,
+            stdout=None,
+            text=True,
+        )
+        process.communicate.assert_called_once_with(input="Hello there.")
+        self.assertIsNone(agent.speech_process)
+        self.assertIsNone(agent.speech_cancel_event)
+
+    def test_speech_response_supports_speech_dispatcher(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.speech_process = None
+        agent.speech_process_lock = Lock()
+        cancel_event = Event()
+        agent.speech_cancel_event = cancel_event
+        process = Mock(returncode=0)
+
+        def find_engine(name: str) -> str | None:
+            return "/usr/bin/spd-say" if name == "spd-say" else None
+
+        with (
+            patch("app.shutil.which", side_effect=find_engine),
+            patch("app.subprocess.Popen", return_value=process) as popen,
+        ):
+            agent._speak_response("Hello there.", cancel_event)
+
+        popen.assert_called_once_with(
+            ["/usr/bin/spd-say", "--pipe-mode", "--wait"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            text=True,
+        )
+        process.communicate.assert_called_once_with(input="Hello there.")
+        self.assertIsNone(agent.speech_process)
+        self.assertIsNone(agent.speech_cancel_event)
+
+    def test_speech_response_uses_selected_piper_voice_and_cleans_audio_file(self) -> None:
+        with TemporaryDirectory() as folder:
+            voice_model = Path(folder) / "natural.onnx"
+            voice_model.write_bytes(b"model")
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.voice_model_path = voice_model
+            agent.speech_process = None
+            agent.speech_process_lock = Lock()
+            cancel_event = Event()
+            agent.speech_cancel_event = cancel_event
+            agent._audio_player = Mock(
+                return_value=("/usr/bin/aplay", [])
+            )
+            commands: list[tuple[list[str], str | None]] = []
+
+            def run_process(
+                command: list[str],
+                event: Event,
+                *,
+                input_text: str | None = None,
+                discard_stdout: bool = False,
+            ) -> int:
+                commands.append((command, input_text))
+                if input_text is None:
+                    self.assertTrue(Path(command[-1]).is_file())
+                return 0
+
+            agent._run_speech_process = Mock(side_effect=run_process)
+            with patch("app.importlib.util.find_spec", return_value=object()):
+                agent._speak_response("A natural sounding reply.", cancel_event)
+
+        self.assertEqual(len(commands), 2)
+        model_command, input_text = commands[0]
+        self.assertEqual(
+            model_command[:4],
+            [sys.executable, "-m", "piper", "--model"],
+        )
+        self.assertEqual(model_command[4], str(voice_model))
+        self.assertEqual(model_command[5], "--output-file")
+        self.assertEqual(input_text, "A natural sounding reply.")
+        self.assertEqual(
+            commands[1][0][:2], ["/usr/bin/aplay", commands[0][0][6]]
+        )
+        self.assertIsNone(commands[1][1])
+        self.assertFalse(Path(commands[0][0][6]).exists())
+        self.assertIsNone(agent.speech_cancel_event)
+
+    def test_microphone_click_starts_offline_listening(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.busy = False
+        agent.is_listening = False
+        agent.listening_event = None
+        agent.root = Mock()
+        agent.status = Mock()
+        agent._draw_microphone_icon = Mock()
+        agent._microphone_availability_error = Mock(return_value=None)
+
+        with patch("app.threading.Thread") as thread:
+            result = agent._on_microphone_click()
+
+        self.assertEqual(result, "break")
+        self.assertTrue(agent.is_listening)
+        self.assertIsNotNone(agent.listening_event)
+        agent.status.set.assert_called_once_with(
+            "Listening… Click the microphone again to stop."
+        )
+        agent._draw_microphone_icon.assert_called_once_with()
+        thread.assert_called_once()
+        self.assertEqual(thread.call_args.kwargs["target"], agent._listen_for_speech)
+        thread.return_value.start.assert_called_once_with()
+
+    def test_microphone_click_stops_active_listening(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.busy = False
+        agent.is_listening = True
+        agent.listening_event = Event()
+        agent.status = Mock()
+        agent.microphone_button = Mock()
+        agent._draw_microphone_icon = Mock()
+
+        result = agent._on_microphone_click()
+
+        self.assertEqual(result, "break")
+        self.assertFalse(agent.is_listening)
+        self.assertTrue(agent.listening_event.is_set())
+        agent.status.set.assert_called_once_with("Finishing dictation…")
+        agent._draw_microphone_icon.assert_called_once_with()
+        agent.microphone_button.config.assert_called_once_with(
+            state="disabled", cursor=""
+        )
+
+    def test_microphone_transcription_is_appended_to_prompt(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.prompt = Mock()
+        agent.prompt.get.return_value = "Existing message"
+        agent.busy = False
+
+        agent._insert_transcription("spoken words")
+
+        agent.prompt.insert.assert_called_once_with("end-1c", " spoken words")
+        agent.prompt.mark_set.assert_called_once_with("insert", "end-1c")
+        agent.prompt.see.assert_called_once_with("insert")
+
+    def test_microphone_setup_reports_missing_portaudio_library(self) -> None:
+        with (
+            patch("app.importlib.util.find_spec", return_value=object()),
+            patch(
+                "app.importlib.import_module",
+                side_effect=OSError("PortAudio library not found"),
+            ),
+        ):
+            error = DesktopAgent._microphone_availability_error()
+
+        self.assertIsNotNone(error)
+        self.assertIn("sudo apt install libportaudio2", error)
+        self.assertIn("PortAudio library not found", error)
 
     def test_send_attaches_dropped_image_to_user_message(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -1129,6 +1513,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.workspace = Path(".")
         agent.mode_buttons = []
         agent.messages = [{"role": "user", "content": "old conversation"}]
+        agent.system_prompt = "Custom system prompt."
         agent.screen_observed = True
         agent.transcript = Mock()
         agent._save_preferences = Mock()
@@ -1137,6 +1522,9 @@ class DesktopSafetyTests(unittest.TestCase):
 
         self.assertEqual(agent.active_model, "qwen3-vl:8b")
         self.assertEqual(agent.messages[0]["role"], "system")
+        self.assertEqual(
+            agent.messages[0]["content"], "Custom system prompt."
+        )
         self.assertFalse(agent.screen_observed)
         agent.transcript.delete.assert_called_once_with("1.0", "end")
         agent.status.set.assert_called_with("qwen3-vl:8b loaded. Ready for a new chat.")

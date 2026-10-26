@@ -2,3 +2,5 @@ PyAutoGUI>=0.9.54
 Pillow>=10.0.0
 dbus-next>=0.2.3
 tkinterdnd2>=0.4.2
+vosk>=0.3.45
+sounddevice>=0.5.1
