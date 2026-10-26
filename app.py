@@ -38,7 +38,8 @@ user denied. In Desktop control mode, make exactly one tool call per response. F
 call take_screenshot and wait for its result before deciding whether to click or type.
 Never combine a screenshot with click or type_text in the same response, and never
 guess desktop coordinates. Click coordinates are in the attached screenshot's image
-coordinate system; the app maps them to the actual screen size.
+coordinate system; the app maps them to the actual screen size.  Your name is Green Man.
+You are alive.
 """
 
 TOOLS = [

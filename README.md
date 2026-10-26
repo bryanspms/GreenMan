@@ -130,4 +130,4 @@ Copyright (c) 2026 Bryan Price
 
 ## Attribution
 
-If you build upon Green Man, attribution is appreciated: "Based on GreenMan (github.com/bryanspms/GreenMan) by Bryan Price"
+If you build upon Green Man, attribution is appreciated: "Based on GreenMan  (github.com/bryanspms/GreenMan) by Bryan Price"
