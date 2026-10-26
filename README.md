@@ -53,6 +53,12 @@ flowchart LR
     Status --> UI
 ```
 
+
+## Screen Shot
+
+![GreenMan](greenMan-ScreenShot.png)
+
+
 ## Requirements
 
 - Python 3.10 or newer
