@@ -20,6 +20,7 @@ from app import (
     MAX_SCREENSHOT_DIMENSION,
     TOOL_CALL_RESPONSE_TOKENS,
     OLLAMA_REQUEST_TIMEOUT_SECONDS,
+    OLLAMA_IMAGE_TOOL_TIMEOUT_SECONDS,
     MAX_IMAGE_BYTES,
     MODEL_OPTIONS,
     SYSTEM_PROMPT,
@@ -28,6 +29,7 @@ from app import (
     calculate_cpu_utilization,
     format_elapsed_timer,
     format_elapsed_time,
+    is_desktop_action_request,
     is_valid_workspace,
     is_text_tool_call,
     load_dropped_image,
@@ -35,15 +37,22 @@ from app import (
     local_ollama_url,
     load_user_preferences,
     list_piper_voice_models,
+    ollama_model_capabilities,
     ollama_http_error_message,
+    compact_desktop_messages,
+    save_verification_screenshot,
     prepare_screenshot,
     piper_voice_directory,
     save_user_preferences,
     read_cpu_counters,
     read_system_status,
     scale_screenshot_coordinates,
+    point_within_window,
+    suggested_focus_coordinates,
     resolve_workspace_path,
+    system_prompt_for_mode,
     set_window_icon,
+    tools_for_desktop_screenshot,
     tools_for_mode,
     vosk_model_path,
 )
@@ -445,9 +454,18 @@ class SystemStatusTests(unittest.TestCase):
 
         with Image.open(BytesIO(base64.b64decode(encoded))) as prepared:
             self.assertEqual(prepared.format, "JPEG")
-            self.assertEqual(prepared.size, (MAX_SCREENSHOT_DIMENSION, 720))
+            self.assertEqual(
+                prepared.size,
+                (
+                    MAX_SCREENSHOT_DIMENSION,
+                    round(1080 * MAX_SCREENSHOT_DIMENSION / 1920),
+                ),
+            )
         self.assertEqual(source_size, (1920, 1080))
-        self.assertEqual(image_size, (MAX_SCREENSHOT_DIMENSION, 720))
+        self.assertEqual(
+            image_size,
+            (MAX_SCREENSHOT_DIMENSION, round(1080 * MAX_SCREENSHOT_DIMENSION / 1920)),
+        )
 
     def test_scales_screenshot_coordinates_to_native_resolution(self) -> None:
         self.assertEqual(
@@ -458,6 +476,32 @@ class SystemStatusTests(unittest.TestCase):
     def test_rejects_coordinates_outside_scaled_screenshot(self) -> None:
         with self.assertRaisesRegex(ValueError, "screenshot size 1280x720"):
             scale_screenshot_coordinates(1280, 360, (1280, 720), (1920, 1080))
+
+    def test_detects_points_inside_green_man_window_after_scaling(self) -> None:
+        self.assertTrue(
+            point_within_window(
+                (668, 667),
+                (1368, 768),
+                (617, 112, 587, 642, 1368, 768),
+            )
+        )
+        self.assertFalse(
+            point_within_window(
+                (500, 300),
+                (1368, 768),
+                (617, 112, 587, 642, 1368, 768),
+            )
+        )
+
+    def test_suggests_safe_point_in_exposed_strip_above_window(self) -> None:
+        self.assertEqual(
+            suggested_focus_coordinates(
+                (1024, 576),
+                (1368, 768),
+                (617, 112, 587, 642, 1368, 768),
+            ),
+            (499, 53),
+        )
 
 
 class OllamaUrlTests(unittest.TestCase):
@@ -472,9 +516,124 @@ class OllamaUrlTests(unittest.TestCase):
 
 
 class ToolCallResponseTests(unittest.TestCase):
+    def test_desktop_context_budget_accounts_for_screenshot_request(self) -> None:
+        self.assertEqual(IMAGE_CONTEXT_TOKENS, 32768)
+
+    def test_approval_releases_dialog_before_waking_action_thread(self) -> None:
+        calls = []
+        dialog = Mock()
+        dialog.grab_release.side_effect = lambda: calls.append("grab_release")
+        dialog.destroy.side_effect = lambda: calls.append("destroy")
+        completed = Mock()
+        completed.set.side_effect = lambda: calls.append("set")
+        decision = []
+
+        DesktopAgent._complete_approval(dialog, decision, True, completed)
+
+        self.assertEqual(decision, [True])
+        self.assertEqual(calls, ["grab_release", "destroy", "set"])
+        dialog.grab_release.assert_called_once_with()
+        dialog.destroy.assert_called_once_with()
+        completed.set.assert_called_once_with()
+
+    def test_saves_verification_screenshot_to_cache(self) -> None:
+        image_bytes = b"\xff\xd8\xffexample"
+        with TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            screenshot_path = save_verification_screenshot(
+                base64.b64encode(image_bytes).decode("ascii")
+            )
+
+            self.assertEqual(
+                screenshot_path,
+                Path(home) / ".cache" / "greenman" / "last-desktop-verification.jpg",
+            )
+            self.assertEqual(screenshot_path.read_bytes(), image_bytes)
+
+    def test_compacts_desktop_history_but_preserves_confirmation_context(self) -> None:
+        old_image = {"role": "user", "content": "The current desktop screenshot is attached.", "images": ["old"]}
+        prior_assistant = {
+            "role": "assistant",
+            "content": "I can close Chrome. Please confirm.",
+        }
+        confirmation = {"role": "user", "content": "yes"}
+        messages = [
+            {"role": "system", "content": "System prompt."},
+            {"role": "user", "content": "Old request."},
+            old_image,
+            prior_assistant,
+            confirmation,
+        ]
+
+        self.assertEqual(
+            compact_desktop_messages(messages),
+            [
+                messages[0],
+                prior_assistant,
+                confirmation,
+            ],
+        )
+
+    def test_compacts_desktop_history_to_latest_request(self) -> None:
+        current_request = {"role": "user", "content": "Close Chrome."}
+        messages = [
+            {"role": "system", "content": "System prompt."},
+            {"role": "user", "content": "Old request."},
+            {
+                "role": "user",
+                "content": "The current desktop screenshot is attached.",
+                "images": ["old screenshot"],
+            },
+            {"role": "assistant", "content": "Old answer."},
+            current_request,
+        ]
+
+        self.assertEqual(
+            compact_desktop_messages(messages),
+            [messages[0], current_request],
+        )
+
+    def test_desktop_control_prompt_uses_in_app_approval_instead_of_chat_confirmation(
+        self,
+    ) -> None:
+        prompt = system_prompt_for_mode("Custom base instructions.", "Desktop control")
+
+        self.assertIn("do not ask for verbal", prompt)
+        self.assertIn("Green Man will show its own approval dialog", prompt)
+        self.assertIn("If the user says yes", prompt)
+        self.assertIn("partly covered", prompt)
+        self.assertIn("or behind Green Man is still open", prompt)
+        self.assertIn("captures and attaches a fresh screenshot", prompt)
+        self.assertIn("close_window with coordinates", prompt)
+        self.assertIn("target window's visible", prompt)
+        self.assertIn("close button", prompt)
+        self.assertIn("claim the application", prompt)
+        self.assertIn("process has exited", prompt)
+        self.assertIn("coordinates are outside the screenshot bounds", SYSTEM_PROMPT)
+        self.assertIn("the blocked action sent no input", SYSTEM_PROMPT)
+        self.assertEqual(
+            system_prompt_for_mode("Custom base instructions.", "Questions only"),
+            "Custom base instructions.",
+        )
+        desktop_prompt = system_prompt_for_mode(
+            "Custom base instructions.", "Desktop control"
+        )
+        self.assertIn("outside the Green Man application window", desktop_prompt)
+
     def test_model_selector_options_and_default(self) -> None:
-        self.assertEqual(MODEL_OPTIONS, ("llama3.1:8b", "qwen3-vl:8b"))
+        self.assertEqual(
+            MODEL_OPTIONS,
+            (
+                "llama3.1:8b",
+                "qwen3-vl:4b-instruct",
+                "qwen3-vl:8b-instruct",
+                "qwen3-vl:4b",
+                "qwen3-vl:8b",
+            ),
+        )
         self.assertEqual(DEFAULT_MODEL, "llama3.1:8b")
+
+    def test_image_tool_response_budget_allows_longer_tool_calls(self) -> None:
+        self.assertEqual(IMAGE_TOOL_CALL_RESPONSE_TOKENS, 8192)
 
     def test_model_load_request_uses_ollama_generate_load_api(self) -> None:
         with patch("app.urlopen") as urlopen:
@@ -504,11 +663,42 @@ class ToolCallResponseTests(unittest.TestCase):
                 "http://127.0.0.1:11434", "qwen3-vl:8b"
             )
 
+    def test_model_capability_check_reads_ollama_show_response(self) -> None:
+        with patch("app.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = (
+                b'{"capabilities":["completion","vision","tools"]}'
+            )
+
+            capabilities = ollama_model_capabilities(
+                "http://127.0.0.1:11434", "qwen3-vl:8b"
+            )
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:11434/api/show")
+        self.assertEqual(json.loads(request.data), {"model": "qwen3-vl:8b"})
+        self.assertEqual(capabilities, frozenset({"completion", "vision", "tools"}))
+
+    def test_model_capability_check_requires_capabilities_metadata(self) -> None:
+        with (
+            patch("app.urlopen") as urlopen,
+            self.assertRaisesRegex(RuntimeError, "did not provide model capabilities"),
+        ):
+            urlopen.return_value.__enter__.return_value.read.return_value = b"{}"
+            ollama_model_capabilities(
+                "http://127.0.0.1:11434", "llama3.1:8b"
+            )
+
     def test_modes_expose_only_their_tools(self) -> None:
         expected = {
             "Questions only": set(),
             "Screenshot": {"take_screenshot"},
-            "Desktop control": {"take_screenshot", "click", "type_text"},
+            "Desktop control": {
+                "take_screenshot",
+                "click",
+                "type_text",
+                "focus_window",
+                "close_window",
+            },
             "Workspace files": {
                 "list_files",
                 "read_file",
@@ -525,9 +715,50 @@ class ToolCallResponseTests(unittest.TestCase):
                     names,
                 )
 
+    def test_non_vision_model_does_not_receive_image_tools(self) -> None:
+        self.assertEqual(
+            tools_for_mode("Screenshot", frozenset({"completion", "tools"})),
+            [],
+        )
+        self.assertEqual(
+            {
+                tool["function"]["name"]
+                for tool in tools_for_mode(
+                    "Workspace files", frozenset({"completion", "tools"})
+                )
+            },
+            {"list_files", "read_file", "write_file"},
+        )
+
     def test_unknown_mode_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown assistant mode"):
             tools_for_mode("Everything")
+
+    def test_screenshot_action_tools_are_bounded_and_close_only_when_requested(self) -> None:
+        original_tools = tools_for_mode("Desktop control")
+        tools = tools_for_desktop_screenshot(
+            original_tools,
+            (1024, 576),
+            close_only=True,
+        )
+
+        self.assertEqual(
+            [tool["function"]["name"] for tool in tools],
+            ["close_window"],
+        )
+        properties = tools[0]["function"]["parameters"]["properties"]
+        self.assertEqual(properties["x"]["minimum"], 0)
+        self.assertEqual(properties["x"]["maximum"], 1023)
+        self.assertEqual(properties["y"]["minimum"], 0)
+        self.assertEqual(properties["y"]["maximum"], 575)
+        original_close = next(
+            tool for tool in original_tools
+            if tool["function"]["name"] == "close_window"
+        )
+        self.assertNotIn(
+            "maximum",
+            original_close["function"]["parameters"]["properties"]["x"],
+        )
 
     def test_chat_request_includes_only_selected_tools(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -680,8 +911,83 @@ class ToolCallResponseTests(unittest.TestCase):
                 "temperature": 0.2,
             },
         )
+        self.assertEqual(
+            urlopen.call_args.kwargs["timeout"],
+            OLLAMA_IMAGE_TOOL_TIMEOUT_SECONDS,
+        )
 
-    def test_new_screenshot_replaces_previous_screenshot_in_history(self) -> None:
+    def test_qwen_four_billion_image_tool_request_uses_bounded_generation_options(
+        self,
+    ) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {
+                "role": "user",
+                "content": "Describe this screenshot.",
+                "images": ["aGVsbG8="],
+            }
+        ]
+        agent.active_response_lock = Lock()
+        agent.active_response = None
+
+        with patch("app.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = (
+                b'{"message":{"role":"assistant","content":"Done."}}'
+            )
+            agent._chat(
+                "http://localhost:11434/api/chat",
+                "qwen3-vl:4b",
+                tools=tools_for_mode("Screenshot"),
+            )
+
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertFalse(payload["think"])
+        self.assertEqual(
+            payload["options"],
+            {
+                "num_ctx": IMAGE_CONTEXT_TOKENS,
+                "num_predict": IMAGE_TOOL_CALL_RESPONSE_TOKENS,
+                "temperature": 0.2,
+            },
+        )
+
+    def test_qwen_instruct_models_receive_qwen_generation_options(self) -> None:
+        for model in ("qwen3-vl:4b-instruct", "qwen3-vl:8b-instruct"):
+            with self.subTest(model=model):
+                agent = DesktopAgent.__new__(DesktopAgent)
+                agent.messages = [
+                    {
+                        "role": "user",
+                        "content": "Describe this screenshot.",
+                        "images": ["aGVsbG8="],
+                    }
+                ]
+                agent.active_response_lock = Lock()
+                agent.active_response = None
+
+                with patch("app.urlopen") as urlopen:
+                    urlopen.return_value.__enter__.return_value.read.return_value = (
+                        b'{"message":{"role":"assistant","content":"Done."}}'
+                    )
+                    agent._chat(
+                        "http://localhost:11434/api/chat",
+                        model,
+                        tools=tools_for_mode("Desktop control"),
+                    )
+
+                payload = json.loads(urlopen.call_args.args[0].data)
+                self.assertFalse(payload["think"])
+                self.assertEqual(payload["model"], model)
+                self.assertEqual(
+                    payload["options"]["num_ctx"],
+                    IMAGE_CONTEXT_TOKENS,
+                )
+                self.assertEqual(
+                    payload["options"]["num_predict"],
+                    IMAGE_TOOL_CALL_RESPONSE_TOKENS,
+                )
+
+    def test_desktop_action_gets_verification_screenshot(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
             {"role": "system", "content": "Desktop instructions."},
@@ -691,16 +997,372 @@ class ToolCallResponseTests(unittest.TestCase):
         agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
         completed = []
         agent._finish = lambda answer, error: completed.append((answer, error))
+        agent.screenshot_image_size = (1024, 576)
+        observed_requests = []
+        observed_tools = []
+
+        def chat(*_args, **_kwargs):
+            observed_requests.append([dict(message) for message in agent.messages])
+            observed_tools.append(_kwargs["tools"])
+            if len(observed_requests) == 1:
+                return {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "click",
+                                    "arguments": {"x": 10, "y": 20},
+                                }
+                            }
+                        ],
+                    }
+                }
+            return {"message": {"role": "assistant", "content": "Done."}}
+
+        agent._chat = Mock(side_effect=chat)
+        agent._execute_tool = Mock(
+            side_effect=[
+                (
+                    "Screenshot captured.",
+                    [base64.b64encode(b"\xff\xd8\xfffirst").decode("ascii")],
+                ),
+                ("Click input sent; the screenshot must confirm its effect.", None),
+                (
+                    "Screenshot captured.",
+                    [base64.b64encode(b"\xff\xd8\xffsecond").decode("ascii")],
+                ),
+            ]
+        )
+        agent.agent_window_bounds = (617, 112, 587, 642, 1368, 768)
+        agent.screenshot_source_size = (1368, 768)
+        agent.screenshot_image_size = (1024, 576)
+
+        agent._run_turn("http://localhost:11434", "qwen3-vl:8b", "Desktop control")
+
+        self.assertEqual(
+            observed_requests[0][-1]["images"],
+            [base64.b64encode(b"\xff\xd8\xfffirst").decode("ascii")],
+        )
+        self.assertIn(
+            "x=432..930, y=54..575", observed_requests[0][-1]["content"]
+        )
+        first_tool_names = [
+            tool["function"]["name"] for tool in observed_tools[0]
+        ]
+        self.assertNotIn("take_screenshot", first_tool_names)
+        click_tool = next(
+            tool
+            for tool in observed_tools[0]
+            if tool["function"]["name"] == "click"
+        )
+        click_properties = click_tool["function"]["parameters"]["properties"]
+        self.assertEqual(click_properties["x"]["maximum"], 1023)
+        self.assertEqual(click_properties["y"]["maximum"], 575)
+        screenshot_messages = [
+            message
+            for message in agent.messages
+            if message.get("images")
+        ]
+        self.assertEqual(len(screenshot_messages), 1)
+        self.assertEqual(
+            screenshot_messages[0]["images"],
+            [base64.b64encode(b"\xff\xd8\xffsecond").decode("ascii")],
+        )
+        self.assertIn("verification screenshot", screenshot_messages[0]["content"])
+        initial_screenshot = next(
+            message
+            for message in agent.messages
+            if message.get("content", "").startswith(
+                "The current desktop screenshot is attached."
+            )
+        )
+        self.assertNotIn("images", initial_screenshot)
+        click_result = next(
+            message
+            for message in agent.messages
+            if message.get("tool_name") == "click"
+        )
+        self.assertIn("screenshot must confirm", click_result["content"])
+        self.assertEqual(
+            [call.args[0] for call in agent._execute_tool.call_args_list],
+            ["take_screenshot", "click", "take_screenshot"],
+        )
+        self.assertEqual(completed, [("Done.", None)])
+
+    def test_blocked_coordinate_action_can_be_corrected_without_extra_screenshot(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Focus Chrome."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
         agent._chat = Mock(
             side_effect=[
                 {
                     "message": {
                         "role": "assistant",
                         "tool_calls": [
-                            {"function": {"name": "take_screenshot", "arguments": {}}}
+                            {
+                                "function": {
+                                    "name": "focus_window",
+                                    "arguments": {"x": 1024, "y": 576},
+                                }
+                            }
                         ],
                     }
                 },
+                {"message": {"role": "assistant", "content": "I will retry within bounds."}},
+            ]
+        )
+        agent._execute_tool = Mock(
+            side_effect=[
+                (
+                    "Screenshot captured and attached at 1024x576.",
+                    [base64.b64encode(b"\xff\xd8\xffscreen").decode("ascii")],
+                ),
+                (
+                    "Action blocked: coordinates are outside the screenshot bounds. "
+                    "Valid screenshot coordinates are x=0..1023 and y=0..575. "
+                    "No input was sent.",
+                    None,
+                ),
+            ]
+        )
+
+        agent._run_turn("http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control")
+
+        self.assertEqual(
+            [call.args[0] for call in agent._execute_tool.call_args_list],
+            ["take_screenshot", "focus_window"],
+        )
+        self.assertEqual(agent._chat.call_count, 2)
+        self.assertIn("No desktop action was taken", completed[0][0])
+        self.assertIsNone(completed[0][1])
+
+    def test_focus_blocked_by_green_man_allows_one_corrected_attempt(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Focus Chrome."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffscreen").decode("ascii")
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "focus_window",
+                                    "arguments": {"x": 500, "y": 500},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "focus_window",
+                                    "arguments": {"x": 180, "y": 45},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {"message": {"role": "assistant", "content": "Chrome is focused."}},
+            ]
+        )
+        agent._execute_tool = Mock(
+            side_effect=[
+                ("Screenshot captured.", [screenshot_data]),
+                (
+                    "Action blocked: the chosen point is inside or too close to the "
+                    "Green Man window. No input was sent.",
+                    None,
+                ),
+                ("Focused the visible Chrome window.", None),
+                ("Verification screenshot.", [screenshot_data]),
+            ]
+        )
+        agent.agent_window_bounds = (617, 112, 587, 642, 1368, 768)
+        agent.screenshot_image_size = (1024, 576)
+
+        agent._run_turn(
+            "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+        )
+
+        self.assertEqual(agent._chat.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in agent._execute_tool.call_args_list],
+            ["take_screenshot", "focus_window", "focus_window", "take_screenshot"],
+        )
+        blocked_result = next(
+            item
+            for item in agent.messages
+            if item.get("tool_name") == "focus_window"
+            and "Action blocked:" in item["content"]
+        )
+        self.assertIn("Chrome visible behind Green Man", blocked_result["content"])
+        self.assertIn("visible strip above it is y=0..43", blocked_result["content"])
+        self.assertEqual(completed, [("Chrome is focused.", None)])
+
+    def test_second_green_man_blocked_focus_stops_without_looping(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Focus Chrome."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffscreen").decode("ascii")
+        focus_call = {
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "focus_window",
+                            "arguments": {"x": 500, "y": 500},
+                        }
+                    }
+                ],
+            }
+        }
+        agent._chat = Mock(
+            side_effect=[
+                focus_call,
+                focus_call,
+            ]
+        )
+        blocked_result = (
+            "Action blocked: the chosen point is inside or too close to the "
+            "Green Man window. No input was sent.",
+            None,
+        )
+        agent._execute_tool = Mock(
+            side_effect=[
+                ("Screenshot captured.", [screenshot_data]),
+                blocked_result,
+                blocked_result,
+            ]
+        )
+
+        agent._run_turn(
+            "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+        )
+
+        self.assertEqual(agent._chat.call_count, 2)
+        self.assertIn("could not focus Chrome safely", completed[0][0])
+        self.assertIsNone(completed[0][1])
+
+    def test_out_of_bounds_focus_provides_exact_safe_retry_coordinate(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Focus Chrome."},
+        ]
+        agent.root = Mock()
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffscreen").decode("ascii")
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "focus_window",
+                                    "arguments": {"x": 1024, "y": 576},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "focus_window",
+                                    "arguments": {"x": 499, "y": 53},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {"message": {"role": "assistant", "content": "Chrome is focused."}},
+            ]
+        )
+        agent._execute_tool = Mock(
+            side_effect=[
+                ("Screenshot captured.", [screenshot_data]),
+                (
+                    "Action blocked: Coordinates must be within the screenshot size "
+                    "1024x576. Valid screenshot coordinates are x=0..1023 and "
+                    "y=0..575. No input was sent.",
+                    None,
+                ),
+                ("Focused the visible Chrome window.", None),
+                ("Verification screenshot.", [screenshot_data]),
+            ]
+        )
+        agent.agent_window_bounds = (617, 112, 587, 642, 1368, 768)
+        agent.screenshot_image_size = (1024, 576)
+        agent.screenshot_source_size = (1368, 768)
+
+        agent._run_turn(
+            "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+        )
+
+        self.assertEqual(agent._chat.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in agent._execute_tool.call_args_list],
+            ["take_screenshot", "focus_window", "focus_window", "take_screenshot"],
+        )
+        blocked_result = next(
+            item
+            for item in agent.messages
+            if item.get("tool_name") == "focus_window"
+            and "Action blocked:" in item["content"]
+        )
+        self.assertIn("exactly x=499, y=53", blocked_result["content"])
+        self.assertEqual(completed, [("Chrome is focused.", None)])
+
+    def test_action_saves_verification_screenshot_and_reports_path(self) -> None:
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffexample").decode("ascii")
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Click the untitled tab."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (100, 50)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        agent._finish = Mock()
+        agent._chat = Mock(
+            side_effect=[
                 {
                     "message": {
                         "role": "assistant",
@@ -714,38 +1376,317 @@ class ToolCallResponseTests(unittest.TestCase):
                         ],
                     }
                 },
-                {
-                    "message": {
-                        "role": "assistant",
-                        "tool_calls": [
-                            {"function": {"name": "take_screenshot", "arguments": {}}}
-                        ],
-                    }
-                },
-                {"message": {"role": "assistant", "content": "Done."}},
+                {"message": {"role": "assistant", "content": "Clicked."}},
             ]
         )
         agent._execute_tool = Mock(
             side_effect=[
-                ("Screenshot captured.", ["first-screenshot"]),
-                ("Clicked.", None),
-                ("Screenshot captured.", ["second-screenshot"]),
+                ("Initial screenshot.", [screenshot_data]),
+                ("Click sent.", None),
+                ("Verification screenshot.", [screenshot_data]),
             ]
         )
 
-        agent._run_turn("http://localhost:11434", "qwen3-vl:8b", "Desktop control")
-
-        screenshots = [
-            message
-            for message in agent.messages
-            if message.get("content", "").startswith(
-                "The current desktop screenshot is attached."
+        with TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            agent._run_turn(
+                "http://localhost:11434",
+                "qwen3-vl:4b-instruct",
+                "Desktop control",
             )
+            path = Path(home) / ".cache" / "greenman" / "last-desktop-verification.jpg"
+            saved_screenshot = path.read_bytes()
+
+        self.assertEqual(saved_screenshot, b"\xff\xd8\xffexample")
+        self.assertEqual(agent._finish.call_args.args[1], None)
+        action_result = next(
+            item for item in agent.messages if item.get("tool_name") == "click"
+        )
+        self.assertIn(str(path), action_result["content"])
+
+    def test_close_window_turn_does_not_repeat_model_success_claim(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Close Chrome."},
         ]
-        self.assertEqual(len(screenshots), 2)
-        self.assertNotIn("images", screenshots[0])
-        self.assertEqual(screenshots[1]["images"], ["second-screenshot"])
-        self.assertEqual(completed, [("Done.", None)])
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "close_window",
+                                    "arguments": {"x": 750, "y": 40},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {"message": {"role": "assistant", "content": "Chrome is still open."}},
+            ]
+        )
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffx").decode("ascii")
+
+        def execute_tool(name, _arguments):
+            if name == "close_window":
+                return "Clicked approved close button at (1000, 60).", None
+            return "Screenshot captured.", [screenshot_data]
+
+        agent._execute_tool = Mock(side_effect=execute_tool)
+
+        with TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            agent._run_turn(
+                "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+            )
+
+        self.assertIn("approved close-button click was sent", completed[0][0])
+        self.assertIn("cannot confirm that Chrome exited", completed[0][0])
+        self.assertIn("Chrome is still open", completed[0][0])
+        self.assertIn("Inspect the verification screenshot", completed[0][0])
+        self.assertIn("last-desktop-verification.jpg", completed[0][0])
+        self.assertIn("No further click was sent", completed[0][0])
+        self.assertEqual(agent._chat.call_count, 2)
+
+    def test_close_window_allows_one_distinct_approved_retry(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Close Chrome."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "close_window",
+                                    "arguments": {"x": 750, "y": 40},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "close_window",
+                                    "arguments": {"x": 760, "y": 40},
+                                }
+                            }
+                        ],
+                    }
+                },
+            ]
+        )
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffx").decode("ascii")
+        agent._execute_tool = Mock(
+            side_effect=lambda name, _arguments: (
+                ("Clicked approved close button.", None)
+                if name == "close_window"
+                else ("Screenshot captured.", [screenshot_data])
+            )
+        )
+
+        with TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            agent._run_turn(
+                "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+            )
+
+        close_calls = [
+            call for call in agent._execute_tool.call_args_list
+            if call.args[0] == "close_window"
+        ]
+        self.assertEqual(len(close_calls), 2)
+        self.assertEqual(
+            [call.args[1] for call in close_calls],
+            [{"x": 750, "y": 40}, {"x": 760, "y": 40}],
+        )
+        self.assertEqual(agent._chat.call_count, 2)
+        self.assertEqual(
+            agent._chat.call_args.kwargs["tools"],
+            tools_for_desktop_screenshot(
+                tools_for_mode("Desktop control"),
+                (1024, 576),
+                close_only=True,
+            ),
+        )
+        self.assertIn("user must approve this second click", agent.messages[-4]["content"])
+        self.assertIn("A close-button click was sent on the second attempt", completed[0][0])
+        self.assertIn("does not confirm that Chrome exited", completed[0][0])
+
+    def test_close_window_blocks_retry_at_same_point(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Close Chrome."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        same_point_call = {
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "close_window",
+                            "arguments": {"x": 750, "y": 40},
+                        }
+                    }
+                ],
+            }
+        }
+        agent._chat = Mock(side_effect=[same_point_call, same_point_call])
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffx").decode("ascii")
+        agent._execute_tool = Mock(
+            side_effect=lambda name, _arguments: (
+                ("Clicked approved close button.", None)
+                if name == "close_window"
+                else ("Screenshot captured.", [screenshot_data])
+            )
+        )
+
+        with TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            agent._run_turn(
+                "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+            )
+
+        close_calls = [
+            call for call in agent._execute_tool.call_args_list
+            if call.args[0] == "close_window"
+        ]
+        self.assertEqual(len(close_calls), 1)
+        self.assertIn("same point again", completed[0][0])
+        self.assertIn("No second close click was sent", completed[0][0])
+
+    def test_close_window_stops_when_corrected_retry_is_blocked(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Close Chrome."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "close_window",
+                                    "arguments": {"x": 750, "y": 40},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "close_window",
+                                    "arguments": {"x": 760, "y": 40},
+                                }
+                            }
+                        ],
+                    }
+                },
+            ]
+        )
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffx").decode("ascii")
+        agent._execute_tool = Mock(
+            side_effect=[
+                ("Screenshot captured.", [screenshot_data]),
+                ("Clicked approved close button.", None),
+                ("Screenshot captured.", [screenshot_data]),
+                ("Action blocked: Green Man covers that point.", None),
+            ]
+        )
+
+        with TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            agent._run_turn(
+                "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+            )
+
+        self.assertEqual(agent._chat.call_count, 2)
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in agent._execute_tool.call_args_list
+                if call.args[0] == "close_window"
+            ],
+            ["close_window", "close_window"],
+        )
+        self.assertIn("second close attempt did not send a click", completed[0][0])
+        self.assertIn("first approved click was sent", completed[0][0])
+        self.assertIn("last-desktop-verification.jpg", completed[0][0])
+
+    def test_failed_desktop_turn_clears_stale_tool_and_image_history(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Describe my desktop."},
+        ]
+        agent.root = Mock()
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        agent._chat = Mock(
+            return_value={
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"function": {"name": "take_screenshot", "arguments": {}}}
+                    ],
+                }
+            }
+        )
+        agent._execute_tool = Mock(
+            return_value=(
+                "Screenshot captured.",
+                [base64.b64encode(b"\xff\xd8\xffimage").decode("ascii")],
+            )
+        )
+
+        agent._run_turn(
+            "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+        )
+
+        self.assertIn("8 tool rounds", completed[0][1])
+        self.assertIn(
+            "Tool sequence: take_screenshot -> take_screenshot -> take_screenshot",
+            completed[0][1],
+        )
+        self.assertEqual(len(agent.messages), 2)
+        self.assertEqual(agent.messages[0]["role"], "system")
+        self.assertIn("Desktop instructions.", agent.messages[0]["content"])
+        self.assertEqual(agent.messages[1]["content"], "Describe my desktop.")
 
     def test_ollama_read_timeout_has_actionable_error(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -842,6 +1783,131 @@ class ToolCallResponseTests(unittest.TestCase):
         self.assertFalse(is_text_tool_call('{"name":"Ada"}'))
         self.assertFalse(is_text_tool_call("Hello, how can I help?"))
 
+    def test_detects_desktop_action_requests_without_matching_how_to_questions(self) -> None:
+        self.assertTrue(is_desktop_action_request("Close Google Chrome."))
+        self.assertTrue(is_desktop_action_request("Can you click the close button?"))
+        self.assertFalse(is_desktop_action_request("How do I close Google Chrome?"))
+        self.assertFalse(is_desktop_action_request("What is open on my desktop?"))
+
+    def test_retries_generic_response_to_desktop_action_and_reports_no_action(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Close Google Chrome."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        generic_answer = (
+            "I'm ready to assist you. Please let me know what you'd like to do next."
+        )
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffscreen").decode("ascii")
+        agent._chat = Mock(
+            side_effect=[
+                {"message": {"role": "assistant", "content": generic_answer}},
+                {"message": {"role": "assistant", "content": generic_answer}},
+            ]
+        )
+        agent._execute_tool = Mock(
+            return_value=("Screenshot captured.", [screenshot_data])
+        )
+
+        agent._run_turn(
+            "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+        )
+
+        self.assertEqual(agent._chat.call_count, 2)
+        self.assertIn(
+            "The user's latest message requests a desktop action",
+            agent._chat.call_args.kwargs["messages"][0]["content"],
+        )
+        self.assertEqual(
+            agent._chat.call_args.kwargs["tools"],
+            tools_for_desktop_screenshot(
+                tools_for_mode("Desktop control"),
+                (1024, 576),
+                close_only=True,
+            ),
+        )
+        retry_messages = agent._chat.call_args.kwargs["messages"]
+        self.assertEqual(retry_messages[-1]["images"], [screenshot_data])
+        self.assertIn("current desktop screenshot is attached", retry_messages[-1]["content"])
+        self.assertEqual(agent._execute_tool.call_count, 2)
+        self.assertEqual(
+            [call.args for call in agent._execute_tool.call_args_list],
+            [("take_screenshot", {}), ("take_screenshot", {})],
+        )
+        self.assertIn("No desktop action was taken", completed[0][0])
+        self.assertIn("nothing was clicked, typed, focused, or closed", completed[0][0])
+
+    def test_desktop_action_retry_can_use_the_fresh_screenshot(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Close Google Chrome."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        screenshot_data = base64.b64encode(b"\xff\xd8\xffscreen").decode("ascii")
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "I'm ready to assist you.",
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "close_window",
+                                    "arguments": {"x": 40, "y": 10},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {"message": {"role": "assistant", "content": "Chrome remains open."}},
+            ]
+        )
+
+        def execute_tool(name, _arguments):
+            if name == "take_screenshot":
+                return "Screenshot captured.", [screenshot_data]
+            return "Clicked approved close button at (40, 10).", None
+
+        agent._execute_tool = Mock(side_effect=execute_tool)
+
+        with TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            agent._run_turn(
+                "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
+            )
+
+        self.assertEqual(agent._chat.call_count, 3)
+        self.assertEqual(
+            agent._chat.call_args_list[1].kwargs["messages"][-1]["images"],
+            [screenshot_data],
+        )
+        self.assertEqual(
+            [call.args[0] for call in agent._execute_tool.call_args_list],
+            [
+                "take_screenshot",
+                "take_screenshot",
+                "close_window",
+                "take_screenshot",
+            ],
+        )
+        self.assertIn("approved close-button click was sent", completed[0][0])
+        self.assertIn("cannot confirm that Chrome exited", completed[0][0])
+
     def test_retries_plain_text_tool_request_without_tools(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
@@ -886,16 +1952,19 @@ class ToolCallResponseTests(unittest.TestCase):
                 "message": {
                     "role": "assistant",
                     "content": "",
-                    "thinking": "Still reasoning",
+                    "thinking": "Still reasoning" * 20,
                 },
                 "done_reason": "length",
+                "eval_count": 4096,
             }
         )
 
         agent._run_turn("http://localhost:11434", "qwen3-vl:8b", "Workspace files")
 
         self.assertEqual(completed[0][0], "")
-        self.assertIn("output or context limit", completed[0][1])
+        self.assertIn("extended internal reasoning", completed[0][1])
+        self.assertIn("4096 tokens", completed[0][1])
+        self.assertIn("qwen3-vl:4b-instruct", completed[0][1])
 
     def test_rejects_tool_calls_outside_selected_mode(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -1554,6 +2623,25 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.url_entry.config.assert_called_once_with(state="normal")
         agent._append.assert_called_once_with("Error", "model not found")
 
+    def test_non_vision_model_disables_visual_modes(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.busy = False
+        agent.model_capabilities = frozenset({"completion", "tools"})
+        agent.mode_buttons = [Mock() for _ in TOOL_MODES]
+        agent.tool_mode = Mock()
+        agent.tool_mode.get.return_value = "Screenshot"
+        agent._save_preferences = Mock()
+
+        agent._update_mode_buttons()
+
+        states = [
+            button.config.call_args.kwargs["state"]
+            for button in agent.mode_buttons
+        ]
+        self.assertEqual(states, ["normal", "disabled", "disabled", "normal", "normal"])
+        agent.tool_mode.set.assert_called_once_with("Questions only")
+        agent._save_preferences.assert_called_once_with()
+
     def test_send_does_not_submit_without_valid_workspace(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.busy = False
@@ -1578,6 +2666,122 @@ class DesktopSafetyTests(unittest.TestCase):
         result, images = agent._execute_tool("click", {"x": 10, "y": 20})
         self.assertIn("take a fresh screenshot", result)
         self.assertIsNone(images)
+
+    def test_close_window_requires_screenshot_and_user_approval(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.screen_observed = True
+        agent.screenshot_image_size = (100, 50)
+        agent.screenshot_source_size = (200, 100)
+        agent.agent_window_bounds = (100, 70, 50, 20, 200, 100)
+        agent._request_approval = Mock(return_value=True)
+        agent.wayland_desktop = Mock()
+
+        result, images = agent._execute_tool(
+            "close_window", {"x": 25, "y": 10}
+        )
+
+        self.assertIn("Clicked approved close button at (50, 20)", result)
+        self.assertIsNone(images)
+        self.assertFalse(agent.screen_observed)
+        agent._request_approval.assert_called_once_with(
+            "close_window", {"x": 25, "y": 10}
+        )
+        agent.wayland_desktop.click.assert_called_once_with(50, 20)
+
+    def test_focus_window_is_blocked_without_fresh_screenshot(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.screen_observed = False
+        agent._request_approval = Mock()
+        agent.wayland_desktop = Mock()
+
+        result, images = agent._execute_tool("focus_window", {"x": 10, "y": 10})
+
+        self.assertIn("take a fresh screenshot", result)
+        self.assertIsNone(images)
+        agent._request_approval.assert_not_called()
+        agent.wayland_desktop.click.assert_not_called()
+
+    def test_focus_window_blocks_click_inside_green_man_window(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.screen_observed = True
+        agent.window_focus_ready = False
+        agent.screenshot_image_size = (1024, 576)
+        agent.screenshot_source_size = (1368, 768)
+        agent.agent_window_bounds = (617, 112, 587, 642, 1368, 768)
+        agent._request_approval = Mock()
+        agent.wayland_desktop = Mock()
+
+        result, images = agent._execute_tool(
+            "focus_window", {"x": 500, "y": 500}
+        )
+
+        self.assertIn("inside or too close to the Green Man window", result)
+        self.assertIn("No input was sent", result)
+        self.assertIsNone(images)
+        self.assertTrue(agent.screen_observed)
+        self.assertFalse(agent.window_focus_ready)
+        agent._request_approval.assert_not_called()
+        agent.wayland_desktop.click.assert_not_called()
+
+    def test_focus_window_rejects_out_of_bounds_before_approval(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.screen_observed = True
+        agent.window_focus_ready = False
+        agent.screenshot_image_size = (1024, 576)
+        agent.screenshot_source_size = (1920, 1080)
+        agent._request_approval = Mock()
+        agent.wayland_desktop = Mock()
+
+        result, images = agent._execute_tool(
+            "focus_window", {"x": 1024, "y": 576}
+        )
+
+        self.assertIn("x=0..1023 and y=0..575", result)
+        self.assertIn("No input was sent", result)
+        self.assertIsNone(images)
+        self.assertTrue(agent.screen_observed)
+        self.assertFalse(agent.window_focus_ready)
+        agent._request_approval.assert_not_called()
+        agent.wayland_desktop.click.assert_not_called()
+
+    def test_close_window_clicks_approved_close_control(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.screen_observed = True
+        agent.screenshot_image_size = (100, 50)
+        agent.screenshot_source_size = (200, 100)
+        agent.agent_window_bounds = (100, 70, 50, 20, 200, 100)
+        agent._request_approval = Mock(return_value=True)
+        agent.wayland_desktop = Mock()
+
+        result, images = agent._execute_tool(
+            "close_window", {"x": 25, "y": 10}
+        )
+
+        self.assertIn("Clicked approved close button", result)
+        self.assertIsNone(images)
+        agent._request_approval.assert_called_once_with(
+            "close_window", {"x": 25, "y": 10}
+        )
+        agent.wayland_desktop.click.assert_called_once_with(50, 20)
+
+    def test_close_window_blocks_close_control_inside_green_man(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.screen_observed = True
+        agent.screenshot_image_size = (100, 50)
+        agent.screenshot_source_size = (200, 100)
+        agent.agent_window_bounds = (100, 70, 50, 20, 200, 100)
+        agent._request_approval = Mock()
+        agent.wayland_desktop = Mock()
+
+        result, images = agent._execute_tool(
+            "close_window", {"x": 50, "y": 40}
+        )
+
+        self.assertIn("inside or too close to the Green Man window", result)
+        self.assertIn("No input was sent", result)
+        self.assertIsNone(images)
+        agent._request_approval.assert_not_called()
+        agent.wayland_desktop.click.assert_not_called()
 
     def test_rejects_outside_write_path_before_approval(self) -> None:
         with TemporaryDirectory() as folder:

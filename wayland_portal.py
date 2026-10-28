@@ -26,6 +26,10 @@ REQUEST_INTERFACE = "org.freedesktop.portal.Request"
 SESSION_INTERFACE = "org.freedesktop.portal.Session"
 PIPEWIRE_INTERFACE = "org.freedesktop.portal.ScreenCast"
 LEFT_BUTTON = 0x110
+KEYBOARD_DEVICE = 1
+POINTER_DEVICE = 2
+KEY_LEFTALT = 56
+KEY_F4 = 62
 
 
 def png_dimensions(image: bytes) -> tuple[int, int]:
@@ -132,6 +136,8 @@ class WaylandDesktopPortal:
         self._bus: MessageBus | None = None
         self._pending_requests: dict[str, asyncio.Future[tuple[int, dict[str, Any]]]] = {}
         self._session_handle: str | None = None
+        self._input_devices_requested = False
+        self._granted_devices = 0
         self._pipewire_fd: int | None = None
         self._stream_id: int | None = None
         self._target_object: str | None = None
@@ -245,9 +251,13 @@ class WaylandDesktopPortal:
                 if pending is future:
                     del self._pending_requests[path]
 
-    async def _ensure_session(self) -> None:
-        if self._session_handle is not None:
+    async def _ensure_session(self, allow_input: bool = False) -> None:
+        if self._session_handle is not None and (
+            not allow_input or self._input_devices_requested
+        ):
             return
+        if self._session_handle is not None:
+            await self._close_session()
         await self._connect()
         session_token = secrets.token_hex(12)
         created = await self._request(
@@ -262,13 +272,14 @@ class WaylandDesktopPortal:
             raise RuntimeError("The desktop portal did not return a session handle.")
         self._session_handle = session_handle
         try:
-            await self._request(
-                REMOTE_DESKTOP,
-                "SelectDevices",
-                "oa{sv}",
-                [session_handle],
-                {"types": Variant("u", 3)},
-            )
+            if allow_input:
+                await self._request(
+                    REMOTE_DESKTOP,
+                    "SelectDevices",
+                    "oa{sv}",
+                    [session_handle],
+                    {"types": Variant("u", 3)},
+                )
             await self._request(
                 SCREEN_CAST,
                 "SelectSources",
@@ -283,10 +294,13 @@ class WaylandDesktopPortal:
                 [session_handle, ""],
                 {},
             )
-            if started.get("devices", 0) & 3 != 3:
+            granted_devices = started.get("devices", 0)
+            if not isinstance(granted_devices, int):
                 raise RuntimeError(
-                    "The portal did not grant both pointer and keyboard access."
+                    "The desktop portal returned an invalid input-device grant."
                 )
+            self._granted_devices = granted_devices if allow_input else 0
+            self._input_devices_requested = allow_input
             streams = started.get("streams", [])
             if len(streams) != 1:
                 raise RuntimeError(
@@ -320,6 +334,12 @@ class WaylandDesktopPortal:
         if self._pipewire_fd is not None:
             os.close(self._pipewire_fd)
             self._pipewire_fd = None
+        self._input_devices_requested = False
+        self._granted_devices = 0
+        self._stream_id = None
+        self._target_object = None
+        self._logical_size = None
+        self._image_size = None
         if self._session_handle is not None and self._bus is not None:
             session_handle = self._session_handle
             self._session_handle = None
@@ -397,8 +417,8 @@ class WaylandDesktopPortal:
             os.close(pipewire_fd)
             Path(filename).unlink(missing_ok=True)
 
-    def screenshot(self) -> str:
-        self._submit(self._ensure_session())
+    def screenshot(self, allow_input: bool = False) -> str:
+        self._submit(self._ensure_session(allow_input=allow_input))
         image = self._capture_png()
         return base64.b64encode(image).decode("ascii")
 
@@ -420,7 +440,15 @@ class WaylandDesktopPortal:
         self._submit(self._click(x, y))
 
     async def _click(self, x: int, y: int) -> None:
-        await self._ensure_session()
+        await self._ensure_session(allow_input=True)
+        if not self._granted_devices & POINTER_DEVICE:
+            raise RuntimeError(
+                "The desktop portal did not grant pointer access "
+                f"(granted device mask: 0x{self._granted_devices:02x}; "
+                "keyboard=1, pointer=2, touchscreen=4). In GNOME's Remote Desktop "
+                "dialog, enable 'Allow Remote Interaction' before sharing; screen "
+                "sharing alone does not grant pointer control."
+            )
         assert self._session_handle is not None
         await self._move_pointer(x, y)
         await self._call(
@@ -442,8 +470,55 @@ class WaylandDesktopPortal:
     def type_text(self, text: str) -> None:
         self._submit(self._type_text(text))
 
+    def close_focused_window(self) -> None:
+        self._submit(self._close_focused_window())
+
+    async def _close_focused_window(self) -> None:
+        await self._ensure_session(allow_input=True)
+        if not self._granted_devices & KEYBOARD_DEVICE:
+            raise RuntimeError(
+                "The desktop portal did not grant keyboard access "
+                f"(granted device mask: 0x{self._granted_devices:02x}; "
+                "keyboard=1, pointer=2, touchscreen=4). In GNOME's Remote Desktop "
+                "dialog, enable 'Allow Remote Interaction' before sharing."
+            )
+        assert self._session_handle is not None
+        await self._call(
+            REMOTE_DESKTOP,
+            "NotifyKeyboardKeycode",
+            "oa{sv}iu",
+            [self._session_handle, {}, KEY_LEFTALT, 1],
+        )
+        try:
+            await self._call(
+                REMOTE_DESKTOP,
+                "NotifyKeyboardKeycode",
+                "oa{sv}iu",
+                [self._session_handle, {}, KEY_F4, 1],
+            )
+            await self._call(
+                REMOTE_DESKTOP,
+                "NotifyKeyboardKeycode",
+                "oa{sv}iu",
+                [self._session_handle, {}, KEY_F4, 0],
+            )
+        finally:
+            await self._call(
+                REMOTE_DESKTOP,
+                "NotifyKeyboardKeycode",
+                "oa{sv}iu",
+                [self._session_handle, {}, KEY_LEFTALT, 0],
+            )
+
     async def _type_text(self, text: str) -> None:
-        await self._ensure_session()
+        await self._ensure_session(allow_input=True)
+        if not self._granted_devices & KEYBOARD_DEVICE:
+            raise RuntimeError(
+                "The desktop portal did not grant keyboard access "
+                f"(granted device mask: 0x{self._granted_devices:02x}; "
+                "keyboard=1, pointer=2, touchscreen=4). In GNOME's Remote Desktop "
+                "dialog, enable 'Allow Remote Interaction' before sharing."
+            )
         assert self._session_handle is not None
         for character in text:
             keysym = keysym_for_character(character)

@@ -68,6 +68,10 @@ flowchart LR
 - A model that supports both vision and tool calling for image and desktop workflows
 - Microphone dictation uses Vosk and the default English speech model (setup below)
 
+Qwen3-VL requires Ollama 0.12.7 or newer. Check the installed version with
+`ollama --version` and update Ollama only if it is older than that; restart the
+Ollama server after updating.
+
 ### Wayland Requirements
 
 On Wayland, Green Man uses the XDG Desktop Portal and PipeWire. If needed, install the required packages on Ubuntu:
@@ -127,11 +131,18 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
 ollama pull llama3.1:8b
-ollama pull qwen3-vl:8b
+ollama pull qwen3-vl:8b-instruct
 python app.py
 ```
 
-The default model is `llama3.1:8b`. Use `qwen3-vl:8b` for image understanding and multimodal tasks.
+The default model is `llama3.1:8b`. Use a Qwen3-VL `-instruct` model for image
+understanding and desktop control. The regular Qwen3-VL tags are thinking
+variants; Ollama's API `think: false` setting does not disable their thinking.
+If the 8B model is too slow, pull the smaller, typically faster 4B instruct model:
+
+```bash
+ollama pull qwen3-vl:4b-instruct
+```
 
 ## Microphone Dictation
 
@@ -169,7 +180,34 @@ downloading a Vosk model and placing its extracted folder at that path.
    - Desktop control
    - Workspace files
    - Run command
+   On Wayland, **Screenshot** requests screen-capture access only; **Desktop
+   control** also requests pointer and keyboard access.
+   After each desktop click, typing, or window-close action, Green Man captures
+   a verification screenshot and saves it to
+   `~/.cache/greenman/last-desktop-verification.jpg`, replacing the previous
+   screenshot. Desktop screenshots may contain private information. To close a
+   window, use **close_window** with a point on the target window's visible
+   close button, outside Green Man. Green Man asks for approval before clicking
+   that specific point. Inspect the saved screenshot to verify the result. If
+   the first click leaves the window visibly open and its close button is still
+   visible, the assistant may request one corrected click at a different point;
+   that retry requires separate approval. Green Man stops after that attempt.
+   If the close button is covered, move or resize Green Man to expose it before
+   trying again.
+   For clear desktop action requests, Green Man attaches a fresh screenshot
+   before asking the model to choose an action and marks its own window area as
+   off-limits.
+   A window partly hidden behind Green Man is still open; the assistant should
+   bring it forward before interacting and must not infer that it closed just
+   because it is obscured or its taskbar icon is absent.
+   Click and typing actions require confirmation in Green Man's approval dialog.
+   If the assistant asks for confirmation in the chat instead, start a new chat
+   and repeat the request; the app approval dialog is the confirmation step.
 3. Choose the Ollama model.
+   Green Man checks its Ollama capabilities and disables **Screenshot** and
+   **Desktop control** unless the model supports both vision and tool calling.
+   The **view_image** tool in **Workspace files** is omitted for models without
+   vision.
 4. Optionally enable **Read responses aloud** and choose **System voice** or an
    installed Piper voice from the **Voice** dropdown.
 5. Use **Edit system prompt…** beside the read-aloud checkbox to customize the

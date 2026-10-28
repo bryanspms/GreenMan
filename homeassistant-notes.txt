@@ -1,0 +1,9 @@
+http://homeassistant.local:8123/api/mcp
+
+
+Your new public key is: 
+
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEDwx9QyTVDdwidPBkgF0XgRcfYql3lo25qQ3oxacHAW
+
+Error: listen tcp 127.0.0.1:11434: bind: address already in use
+

@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, patch
 from dbus_next import Message, MessageType
 
 from wayland_portal import (
+    KEY_F4,
+    KEY_LEFTALT,
     WaylandDesktopPortal,
     keysym_for_character,
     png_dimensions,
@@ -73,6 +75,28 @@ class WaylandPortalUtilityTests(unittest.TestCase):
     def test_keysym_rejects_control_characters(self) -> None:
         with self.assertRaisesRegex(ValueError, "control character"):
             keysym_for_character("\x01")
+
+    def test_close_focused_window_sends_alt_f4_and_releases_keys(self) -> None:
+        portal = WaylandDesktopPortal.__new__(WaylandDesktopPortal)
+        portal._session_handle = "/session/1"
+        portal._granted_devices = 1
+        portal._ensure_session = AsyncMock()
+        portal._call = AsyncMock()
+
+        asyncio.run(portal._close_focused_window())
+
+        self.assertEqual(
+            [
+                call.args[1:4]
+                for call in portal._call.await_args_list
+            ],
+            [
+                ("NotifyKeyboardKeycode", "oa{sv}iu", ["/session/1", {}, KEY_LEFTALT, 1]),
+                ("NotifyKeyboardKeycode", "oa{sv}iu", ["/session/1", {}, KEY_F4, 1]),
+                ("NotifyKeyboardKeycode", "oa{sv}iu", ["/session/1", {}, KEY_F4, 0]),
+                ("NotifyKeyboardKeycode", "oa{sv}iu", ["/session/1", {}, KEY_LEFTALT, 0]),
+            ],
+        )
 
     def test_pointer_coordinates_scale_to_logical_size(self) -> None:
         self.assertEqual(
@@ -205,6 +229,91 @@ class WaylandPortalUtilityTests(unittest.TestCase):
                 portal._capture_png()
         finally:
             os.close(portal._pipewire_fd)
+
+
+class WaylandPortalSessionTests(unittest.TestCase):
+    def _portal(self, granted_devices: int = 3) -> WaylandDesktopPortal:
+        portal = WaylandDesktopPortal.__new__(WaylandDesktopPortal)
+        portal._session_handle = None
+        portal._input_devices_requested = False
+        portal._granted_devices = 0
+        portal._pipewire_fd = None
+        portal._stream_id = None
+        portal._target_object = None
+        portal._logical_size = None
+        portal._image_size = None
+        portal._connect = AsyncMock()
+        portal._bus = None
+
+        async def request_response(_interface, method, *_args):
+            if method == "CreateSession":
+                return {"session_handle": "/session/1"}
+            if method == "Start":
+                return {
+                    "devices": granted_devices,
+                    "streams": [(73, {"pipewire-serial": "95"})],
+                }
+            return {}
+
+        portal._request = AsyncMock(side_effect=request_response)
+        portal._call = AsyncMock(return_value=[42])
+        return portal
+
+    def test_screenshot_session_does_not_request_input_devices(self) -> None:
+        portal = self._portal()
+
+        asyncio.run(portal._ensure_session())
+
+        requested_methods = [
+            call.args[1] for call in portal._request.await_args_list
+        ]
+        self.assertNotIn("SelectDevices", requested_methods)
+        self.assertFalse(portal._input_devices_requested)
+        self.assertEqual(portal._stream_id, 73)
+
+    def test_desktop_control_session_requests_both_input_devices(self) -> None:
+        portal = self._portal()
+
+        asyncio.run(portal._ensure_session(allow_input=True))
+
+        requested_methods = [
+            call.args[1] for call in portal._request.await_args_list
+        ]
+        self.assertIn("SelectDevices", requested_methods)
+        self.assertTrue(portal._input_devices_requested)
+        self.assertEqual(portal._granted_devices, 3)
+
+    def test_keyboard_only_grant_keeps_screenshot_session(self) -> None:
+        portal = self._portal(granted_devices=1)
+
+        asyncio.run(portal._ensure_session(allow_input=True))
+
+        self.assertEqual(portal._granted_devices, 1)
+        self.assertEqual(portal._stream_id, 73)
+
+    def test_click_reports_missing_pointer_permission(self) -> None:
+        portal = self._portal(granted_devices=1)
+        portal._session_handle = "/session/1"
+        portal._input_devices_requested = True
+        portal._granted_devices = 1
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "did not grant pointer access.*mask: 0x01.*Allow Remote Interaction",
+        ):
+            asyncio.run(portal._click(10, 20))
+
+    def test_typing_reports_missing_keyboard_permission(self) -> None:
+        portal = self._portal(granted_devices=2)
+        portal._session_handle = "/session/1"
+        portal._input_devices_requested = True
+        portal._granted_devices = 2
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "did not grant keyboard access.*mask: 0x02.*Allow Remote Interaction",
+        ):
+            asyncio.run(portal._type_text("x"))
 
 
 if __name__ == "__main__":
