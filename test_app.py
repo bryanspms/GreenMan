@@ -56,6 +56,8 @@ from app import (
     tools_for_mode,
     vosk_model_path,
 )
+from desktop_applications import DesktopApplication
+from window_accessibility import AccessibleWindow
 
 
 class WorkspacePathTests(unittest.TestCase):
@@ -603,11 +605,11 @@ class ToolCallResponseTests(unittest.TestCase):
         self.assertIn("partly covered", prompt)
         self.assertIn("or behind Green Man is still open", prompt)
         self.assertIn("captures and attaches a fresh screenshot", prompt)
-        self.assertIn("close_window with coordinates", prompt)
-        self.assertIn("target window's visible", prompt)
-        self.assertIn("close button", prompt)
-        self.assertIn("claim the application", prompt)
-        self.assertIn("process has exited", prompt)
+        self.assertIn("close_named_window", prompt)
+        self.assertIn("list_windows", prompt)
+        self.assertIn("exact title", prompt)
+        self.assertIn("tool result or verification screenshot confirms it", prompt)
+        self.assertIn("application exited", prompt)
         self.assertIn("coordinates are outside the screenshot bounds", SYSTEM_PROMPT)
         self.assertIn("the blocked action sent no input", SYSTEM_PROMPT)
         self.assertEqual(
@@ -617,7 +619,7 @@ class ToolCallResponseTests(unittest.TestCase):
         desktop_prompt = system_prompt_for_mode(
             "Custom base instructions.", "Desktop control"
         )
-        self.assertIn("outside the Green Man application window", desktop_prompt)
+        self.assertIn("Never target Green Man itself", desktop_prompt)
 
     def test_model_selector_options_and_default(self) -> None:
         self.assertEqual(
@@ -694,10 +696,17 @@ class ToolCallResponseTests(unittest.TestCase):
             "Screenshot": {"take_screenshot"},
             "Desktop control": {
                 "take_screenshot",
+                "list_windows",
+                "list_applications",
+                "launch_application",
+                "activate_window",
                 "click",
                 "type_text",
+                "press_key",
+                "wait",
                 "focus_window",
                 "close_window",
+                "close_named_window",
             },
             "Workspace files": {
                 "list_files",
@@ -729,6 +738,18 @@ class ToolCallResponseTests(unittest.TestCase):
             },
             {"list_files", "read_file", "write_file"},
         )
+        desktop_tools = {
+            tool["function"]["name"]
+            for tool in tools_for_mode(
+                "Desktop control", frozenset({"completion", "tools"})
+            )
+        }
+        self.assertIn("list_windows", desktop_tools)
+        self.assertIn("close_named_window", desktop_tools)
+        self.assertIn("list_applications", desktop_tools)
+        self.assertIn("launch_application", desktop_tools)
+        self.assertNotIn("take_screenshot", desktop_tools)
+        self.assertNotIn("click", desktop_tools)
 
     def test_unknown_mode_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown assistant mode"):
@@ -1403,11 +1424,193 @@ class ToolCallResponseTests(unittest.TestCase):
         )
         self.assertIn(str(path), action_result["content"])
 
+    def test_close_request_uses_named_window_discovery_and_verification(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Close Google Chrome."},
+        ]
+        agent.root = Mock()
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        target = AccessibleWindow(
+            "Google Chrome",
+            "Green Man docs - Google Chrome",
+            ":1.11",
+            "/org/a11y/atspi/window/1",
+        )
+        agent.last_named_close_window = target
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": "list_windows", "arguments": {}}}
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "close_named_window",
+                                    "arguments": {
+                                        "title_or_app": target.title,
+                                    },
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": "list_windows", "arguments": {}}}
+                        ],
+                    }
+                },
+                {"message": {"role": "assistant", "content": "It is closed."}},
+            ]
+        )
+
+        def execute_tool(name, _arguments):
+            if name == "list_windows":
+                close_sent = any(
+                    call.args[0] == "close_named_window"
+                    for call in agent._execute_tool.call_args_list
+                )
+                if close_sent:
+                    return "[]", None
+                return (
+                    json.dumps(
+                        [
+                            {
+                                "application": target.application,
+                                "title": target.title,
+                            }
+                        ]
+                    ),
+                    None,
+                )
+            return "Sent the close-window shortcut.", None
+
+        agent._execute_tool = Mock(side_effect=execute_tool)
+        agent._run_turn(
+            "http://localhost:11434", "llama3.1:8b", "Desktop control"
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in agent._execute_tool.call_args_list],
+            ["list_windows", "close_named_window", "list_windows"],
+        )
+        self.assertIn("no longer contains", completed[0][0])
+        self.assertIn(target.title, completed[0][0])
+        self.assertIsNone(completed[0][1])
+
+    def test_open_request_uses_catalog_approval_and_window_verification(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "Open Google Chrome."},
+        ]
+        agent.root = Mock()
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        application = DesktopApplication(
+            "Google Chrome",
+            "google-chrome.desktop",
+            Path("/usr/share/applications/google-chrome.desktop"),
+        )
+        agent.last_launched_application = application
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "list_applications",
+                                    "arguments": {},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "launch_application",
+                                    "arguments": {"title_or_app": "Google Chrome"},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": "list_windows", "arguments": {}}}
+                        ],
+                    }
+                },
+                {"message": {"role": "assistant", "content": "It is open."}},
+            ]
+        )
+        agent._execute_tool = Mock(
+            side_effect=[
+                (
+                    json.dumps(
+                        [
+                            {
+                                "name": application.name,
+                                "desktop_id": application.desktop_id,
+                            }
+                        ]
+                    ),
+                    None,
+                ),
+                (f"Launched {application.name!r}.", None),
+                (
+                    json.dumps(
+                        [
+                            {
+                                "application": application.name,
+                                "title": "Google Chrome",
+                            }
+                        ]
+                    ),
+                    None,
+                ),
+            ]
+        )
+
+        agent._run_turn(
+            "http://localhost:11434", "llama3.1:8b", "Desktop control"
+        )
+
+        self.assertEqual(
+            [call.args[0] for call in agent._execute_tool.call_args_list],
+            ["list_applications", "launch_application", "list_windows"],
+        )
+        self.assertIn("Its window is open", completed[0][0])
+        self.assertIsNone(completed[0][1])
+
     def test_close_window_turn_does_not_repeat_model_success_claim(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
             {"role": "system", "content": "Desktop instructions."},
-            {"role": "user", "content": "Close Chrome."},
+            {"role": "user", "content": "Click the upper-right button in Chrome."},
         ]
         agent.root = Mock()
         agent.screenshot_image_size = (1024, 576)
@@ -1458,7 +1661,7 @@ class ToolCallResponseTests(unittest.TestCase):
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
             {"role": "system", "content": "Desktop instructions."},
-            {"role": "user", "content": "Close Chrome."},
+            {"role": "user", "content": "Click the upper-right button in Chrome."},
         ]
         agent.root = Mock()
         agent.screenshot_image_size = (1024, 576)
@@ -1535,7 +1738,7 @@ class ToolCallResponseTests(unittest.TestCase):
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
             {"role": "system", "content": "Desktop instructions."},
-            {"role": "user", "content": "Close Chrome."},
+            {"role": "user", "content": "Click the upper-right button in Chrome."},
         ]
         agent.root = Mock()
         agent.screenshot_image_size = (1024, 576)
@@ -1582,7 +1785,7 @@ class ToolCallResponseTests(unittest.TestCase):
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
             {"role": "system", "content": "Desktop instructions."},
-            {"role": "user", "content": "Close Chrome."},
+            {"role": "user", "content": "Click the upper-right button in Chrome."},
         ]
         agent.root = Mock()
         agent.screenshot_image_size = (1024, 576)
@@ -1678,7 +1881,7 @@ class ToolCallResponseTests(unittest.TestCase):
             "http://localhost:11434", "qwen3-vl:4b-instruct", "Desktop control"
         )
 
-        self.assertIn("8 tool rounds", completed[0][1])
+        self.assertIn("14 tool rounds", completed[0][1])
         self.assertIn(
             "Tool sequence: take_screenshot -> take_screenshot -> take_screenshot",
             completed[0][1],
@@ -1793,7 +1996,7 @@ class ToolCallResponseTests(unittest.TestCase):
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
             {"role": "system", "content": "Desktop instructions."},
-            {"role": "user", "content": "Close Google Chrome."},
+            {"role": "user", "content": "Click the upper-right button in Google Chrome."},
         ]
         agent.root = Mock()
         agent.screenshot_image_size = (1024, 576)
@@ -1828,7 +2031,7 @@ class ToolCallResponseTests(unittest.TestCase):
             tools_for_desktop_screenshot(
                 tools_for_mode("Desktop control"),
                 (1024, 576),
-                close_only=True,
+                close_only=False,
             ),
         )
         retry_messages = agent._chat.call_args.kwargs["messages"]
@@ -1840,13 +2043,13 @@ class ToolCallResponseTests(unittest.TestCase):
             [("take_screenshot", {}), ("take_screenshot", {})],
         )
         self.assertIn("No desktop action was taken", completed[0][0])
-        self.assertIn("nothing was clicked, typed, focused, or closed", completed[0][0])
+        self.assertIn("No desktop action was taken", completed[0][0])
 
     def test_desktop_action_retry_can_use_the_fresh_screenshot(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
             {"role": "system", "content": "Desktop instructions."},
-            {"role": "user", "content": "Close Google Chrome."},
+            {"role": "user", "content": "Click the upper-right button in Google Chrome."},
         ]
         agent.root = Mock()
         agent.screenshot_image_size = (1024, 576)
@@ -2782,6 +2985,112 @@ class DesktopSafetyTests(unittest.TestCase):
         self.assertIsNone(images)
         agent._request_approval.assert_not_called()
         agent.wayland_desktop.click.assert_not_called()
+
+    def test_list_windows_returns_accessible_titles_without_approval(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.window_controller = Mock()
+        agent.window_controller.list_windows.return_value = [
+            Mock(application="Google Chrome", title="Example - Google Chrome")
+        ]
+        agent._request_approval = Mock()
+
+        result, images = agent._execute_tool("list_windows", {})
+
+        self.assertEqual(
+            json.loads(result),
+            [{"application": "Google Chrome", "title": "Example - Google Chrome"}],
+        )
+        self.assertIsNone(images)
+        agent._request_approval.assert_not_called()
+
+    def test_close_named_window_requires_approval_and_activates_exact_window(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        target = Mock(
+            application="Google Chrome",
+            title="Example - Google Chrome",
+            bus_name=":1.10",
+            object_path="/org/a11y/atspi/window/1",
+        )
+        agent.root = Mock()
+        agent.root.title.return_value = "Local Green Man Assistant"
+        agent.window_controller = Mock()
+        agent.window_controller.list_windows.return_value = [target]
+        agent.window_controller.select_window.return_value = target
+        agent.window_controller.focus_window.return_value = target
+        agent.wayland_desktop = Mock()
+        agent.shell_windows = Mock()
+        agent.shell_windows.is_available.return_value = False
+        agent._request_approval = Mock(return_value=True)
+
+        result, images = agent._execute_tool(
+            "close_named_window", {"title_or_app": "Google Chrome"}
+        )
+
+        self.assertIn("Sent the close-window shortcut", result)
+        self.assertIn("Example - Google Chrome", result)
+        self.assertIsNone(images)
+        agent._request_approval.assert_called_once_with(
+            "close_named_window",
+            {
+                "application": "Google Chrome",
+                "title": "Example - Google Chrome",
+            },
+        )
+        agent.window_controller.focus_window.assert_called_once_with(
+            "Example - Google Chrome", "Local Green Man Assistant"
+        )
+        agent.wayland_desktop.close_focused_window.assert_called_once_with()
+
+    def test_close_named_window_does_not_focus_after_denial(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        target = Mock(
+            application="Google Chrome",
+            title="Example - Google Chrome",
+            bus_name=":1.10",
+            object_path="/org/a11y/atspi/window/1",
+        )
+        agent.root = Mock()
+        agent.root.title.return_value = "Local Green Man Assistant"
+        agent.window_controller = Mock()
+        agent.window_controller.list_windows.return_value = [target]
+        agent.window_controller.select_window.return_value = target
+        agent._request_approval = Mock(return_value=False)
+        agent.wayland_desktop = Mock()
+
+        result, images = agent._execute_tool(
+            "close_named_window", {"title_or_app": "Google Chrome"}
+        )
+
+        self.assertEqual(result, "Action denied by the user.")
+        self.assertIsNone(images)
+        agent.window_controller.focus_window.assert_not_called()
+        agent.wayland_desktop.close_focused_window.assert_not_called()
+
+    def test_launch_application_requires_approval(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        application = Mock()
+        application.name = "Google Chrome"
+        application.desktop_id = "google-chrome.desktop"
+        agent.application_launcher = Mock()
+        agent.application_launcher.list_applications.return_value = [application]
+        agent.application_launcher.resolve_application.return_value = application
+        agent.application_launcher.launch.return_value = None
+        agent._request_approval = Mock(return_value=True)
+
+        result, images = agent._execute_tool(
+            "launch_application", {"title_or_app": "Google Chrome"}
+        )
+
+        self.assertIn("Launched", result)
+        self.assertIsNone(images)
+        agent._request_approval.assert_called_once_with(
+            "launch_application",
+            {
+                "application": "Google Chrome",
+                "desktop_id": "google-chrome.desktop",
+            },
+        )
+        agent.application_launcher.launch.assert_called_once_with(application)
 
     def test_rejects_outside_write_path_before_approval(self) -> None:
         with TemporaryDirectory() as folder:

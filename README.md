@@ -144,6 +144,21 @@ If the 8B model is too slow, pull the smaller, typically faster 4B instruct mode
 ollama pull qwen3-vl:4b-instruct
 ```
 
+## GNOME Wayland Window Control (optional)
+
+On GNOME Wayland, apps cannot be focused through accessibility, so closing or
+activating a window by title needs a small shell extension. Install it, then log
+out and back in once:
+
+```bash
+cp -r gnome_extension/greenman-windows@greenman.local ~/.local/share/gnome-shell/extensions/
+gnome-extensions enable greenman-windows@greenman.local
+```
+
+When the extension is running, Green Man uses it to close or activate the window
+with the approved exact title. Without it, Green Man falls back to the
+accessibility and keyboard-shortcut path.
+
 ## Microphone Dictation
 
 The microphone button beside the message field starts live, offline English
@@ -178,31 +193,42 @@ downloading a Vosk model and placing its extracted folder at that path.
    - Questions only
    - Screenshot
    - Desktop control
+     On Wayland, **Screenshot** requests screen-capture access only; **Desktop
+     control** also requests pointer and keyboard access.
+     Use **list_windows** to locate windows by application and title, including
+     windows behind Green Man. Use **activate_window** to bring one forward,
+     **close_named_window** to close it, and **list_applications** /
+     **launch_application** to open an installed desktop app. Green Man shows the
+     resolved window or app in its approval dialog before activation, closing, or
+     launch. For controls inside a window, activate it first, then use the fresh
+     screenshot for clicks and typing. A close request is verified by checking
+     whether the title is still in the accessible window list; that does not prove
+     the entire application process has exited. Screenshots after visual clicks
+     and typing are saved to
+     `~/.cache/greenman/last-desktop-verification.jpg`; desktop screenshots may
+     contain private information.
+
+     ```mermaid
+     flowchart TD
+         A[Request to open, find, interact with, or close an app] --> B{Requested action}
+         B -- Open --> C[list_applications]
+         C --> D[Select installed app]
+         D --> E[Approve launch in Green Man]
+         E --> F[launch_application]
+         F --> G[list_windows to verify]
+         B -- Find, interact, or close --> H[list_windows]
+         H --> I[Match application and window title]
+         I --> J{Requested action}
+         J -- Close --> K[Approve exact window title]
+         K --> L[Activate that window and send close shortcut]
+         L --> M[list_windows to verify]
+         J -- Interact --> N[Approve and activate window]
+         N --> O[Capture fresh screenshot]
+         O --> P[Approve visual click or typing]
+         P --> Q[Inspect verification screenshot]
+     ```
    - Workspace files
    - Run command
-   On Wayland, **Screenshot** requests screen-capture access only; **Desktop
-   control** also requests pointer and keyboard access.
-   After each desktop click, typing, or window-close action, Green Man captures
-   a verification screenshot and saves it to
-   `~/.cache/greenman/last-desktop-verification.jpg`, replacing the previous
-   screenshot. Desktop screenshots may contain private information. To close a
-   window, use **close_window** with a point on the target window's visible
-   close button, outside Green Man. Green Man asks for approval before clicking
-   that specific point. Inspect the saved screenshot to verify the result. If
-   the first click leaves the window visibly open and its close button is still
-   visible, the assistant may request one corrected click at a different point;
-   that retry requires separate approval. Green Man stops after that attempt.
-   If the close button is covered, move or resize Green Man to expose it before
-   trying again.
-   For clear desktop action requests, Green Man attaches a fresh screenshot
-   before asking the model to choose an action and marks its own window area as
-   off-limits.
-   A window partly hidden behind Green Man is still open; the assistant should
-   bring it forward before interacting and must not infer that it closed just
-   because it is obscured or its taskbar icon is absent.
-   Click and typing actions require confirmation in Green Man's approval dialog.
-   If the assistant asks for confirmation in the chat instead, start a new chat
-   and repeat the request; the app approval dialog is the confirmation step.
 3. Choose the Ollama model.
    Green Man checks its Ollama capabilities and disables **Screenshot** and
    **Desktop control** unless the model supports both vision and tool calling.

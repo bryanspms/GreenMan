@@ -31,6 +31,48 @@ POINTER_DEVICE = 2
 KEY_LEFTALT = 56
 KEY_F4 = 62
 
+MODIFIER_KEYCODES = {
+    "ctrl": 29, "control": 29, "shift": 42, "alt": 56, "super": 125, "meta": 125,
+}
+NAMED_KEYCODES = {
+    "esc": 1, "escape": 1, "backspace": 14, "tab": 15, "enter": 28, "return": 28,
+    "space": 57, "home": 102, "up": 103, "pageup": 104, "left": 105, "right": 106,
+    "end": 107, "down": 108, "pagedown": 109, "insert": 110, "delete": 111,
+    "minus": 12, "equal": 13, "comma": 51, "period": 52, "slash": 53,
+}
+NAMED_KEYCODES.update({f"f{n}": 58 + n for n in range(1, 11)})
+NAMED_KEYCODES.update({"f11": 87, "f12": 88})
+NAMED_KEYCODES.update(
+    {c: code for c, code in zip("1234567890", range(2, 12))}
+)
+NAMED_KEYCODES.update(
+    {
+        c: code
+        for row, start in (("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44))
+        for c, code in zip(row, range(start, start + len(row)))
+    }
+)
+
+
+def keycodes_for_chord(chord: str) -> tuple[list[int], int]:
+    """Return (modifier keycodes, main keycode) for a chord such as 'ctrl+t'."""
+    parts = [part.strip().casefold() for part in chord.split("+") if part.strip()]
+    if not parts:
+        raise ValueError("Provide a key or key combination such as 'ctrl+t'.")
+    *modifier_names, key_name = parts
+    modifiers = []
+    for name in modifier_names:
+        if name not in MODIFIER_KEYCODES:
+            raise ValueError(
+                f"Unsupported modifier {name!r}. Use ctrl, shift, alt, or super."
+            )
+        modifiers.append(MODIFIER_KEYCODES[name])
+    if key_name in MODIFIER_KEYCODES and not modifiers:
+        raise ValueError("Provide a non-modifier key such as 't' or 'enter'.")
+    if key_name not in NAMED_KEYCODES:
+        raise ValueError(f"Unsupported key {key_name!r}.")
+    return modifiers, NAMED_KEYCODES[key_name]
+
 
 def png_dimensions(image: bytes) -> tuple[int, int]:
     if len(image) < 24 or image[:8] != b"\x89PNG\r\n\x1a\n" or image[12:16] != b"IHDR":
@@ -472,6 +514,39 @@ class WaylandDesktopPortal:
 
     def close_focused_window(self) -> None:
         self._submit(self._close_focused_window())
+
+    def press_keys(self, chord: str) -> None:
+        modifiers, key = keycodes_for_chord(chord)
+        self._submit(self._press_keys(modifiers, key))
+
+    async def _press_keys(self, modifiers: list[int], key: int) -> None:
+        await self._ensure_session(allow_input=True)
+        if not self._granted_devices & KEYBOARD_DEVICE:
+            raise RuntimeError(
+                "The desktop portal did not grant keyboard access "
+                f"(granted device mask: 0x{self._granted_devices:02x}; "
+                "keyboard=1, pointer=2, touchscreen=4). In GNOME's Remote Desktop "
+                "dialog, enable 'Allow Remote Interaction' before sharing."
+            )
+        assert self._session_handle is not None
+        pressed: list[int] = []
+
+        async def notify(code: int, state: int) -> None:
+            await self._call(
+                REMOTE_DESKTOP,
+                "NotifyKeyboardKeycode",
+                "oa{sv}iu",
+                [self._session_handle, {}, code, state],
+            )
+
+        try:
+            for code in [*modifiers, key]:
+                await notify(code, 1)
+                pressed.append(code)
+            await asyncio.sleep(0.02)
+        finally:
+            for code in reversed(pressed):
+                await notify(code, 0)
 
     async def _close_focused_window(self) -> None:
         await self._ensure_session(allow_input=True)

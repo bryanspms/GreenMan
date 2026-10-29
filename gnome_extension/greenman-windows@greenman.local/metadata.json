@@ -1,0 +1,7 @@
+{
+  "uuid": "greenman-windows@greenman.local",
+  "name": "Green Man Windows",
+  "description": "Lets Green Man activate or close a window by exact title over D-Bus.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 1
+}

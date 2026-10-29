@@ -1,0 +1,58 @@
+(1) Put focus on Text Editor app.
+(2) Press Ctrl+T in Text Editor app.
+(3) Add text, "Hello, world from Green Man.".
+(4) send Ctrl+s
+(5) Click the "Save" button.
+(6) Close Text Editor app.
+
+(1) Put focus on Text Editor app.
+(2) Press Ctrl+T in Text Editor app.
+(3) Add text, "Hello, world from Green Man." in Text Editor app.
+(4) send Ctrl+s in Text Editor app
+(5) Click the "Save" button.
+(6) Close Text Editor app.
+
+
+(1) Open Text Editor app.
+(2) Send Ctrl+T to open a New Tab.
+(3) Add text, "Hello, world from Green Man." to the new tab.
+(4) Send Ctrl+S to invoke the save file dialog.
+(5) Click the "Save" button at the bottom right of the Save a File dialog box.
+(6) Close Text Editor app.
+
+(1) Focus Text Editor app.
+(2) press Ctrl+T.
+(3) Add the text, "Hello, world from Green Man!" to the new Text Editor tab.
+(4) press Ctrl+S
+(5) press ENTER
+(6) Close Text Editor app.
+
+(1) Open Text Editor app.
+(2) press Ctrl+T.
+(3) Add the text, "Hello, world from Green Man!" to the new Text Editor tab.
+(4) press Ctrl+S to save.
+(5) press ENTER to save as the default file name.
+(6) Close Text Editor app.
+
+(1) Open Text Editor app.
+(2) press Ctrl+T.
+(3) Add the text, "Hello, world from Green Man!" to the new Text Editor tab.
+(4) press Ctrl+S to save.
+(5) press ENTER to save as the default file name.
+(6) press Alt+F4 to close Text Editor app.
+
+(1) Open Text Editor app.
+(2) press Ctrl+T.
+(3) Add the text, "Hello, world from Green Man!" to the new Text Editor tab.
+(4) press Ctrl+S to save.
+(5) Enter "Hello world from Green Man-1" in the file name prompt.
+(5) press ENTER to save the file.
+(6) press Alt+F4 to close Text Editor app.
+
+(1) Open Text Editor app.
+(2) press Ctrl+T for a new tab.
+(3) Add the text, "Hello, world from Green Man!" to the new Text Editor tab.
+(4) press Ctrl+S to save.
+(5) Enter "Hello world from Green Man-2" in the file name prompt.
+(5) press ENTER to save the file.
+(6) Close Text Editor app.
