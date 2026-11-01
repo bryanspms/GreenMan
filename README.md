@@ -52,9 +52,11 @@ flowchart LR
 ```
 
 
-## Screen Shot
+## Screen Shots
 
-![GreenMan](greenMan-ScreenShot.png)
+![GreenMan](greenMan-AppScreenshot.png)
+
+![GreenMan](greenMan-EditSystemPrompt.png)
 
 
 ## Requirements
