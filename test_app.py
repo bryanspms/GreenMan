@@ -519,6 +519,47 @@ class OllamaUrlTests(unittest.TestCase):
                 local_ollama_url(url)
 
 
+class SaveTranscriptTests(unittest.TestCase):
+    def _agent(self, text: str, workspace=None) -> DesktopAgent:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.transcript = Mock()
+        agent.transcript.get.return_value = text
+        agent.status = Mock()
+        agent.workspace = workspace
+        return agent
+
+    def test_saves_transcript_text_to_chosen_file(self) -> None:
+        with TemporaryDirectory() as folder:
+            target = Path(folder) / "out.txt"
+            agent = self._agent("You: hi\n\nAssistant: hello\n\n", Path(folder))
+            with patch("app.filedialog.asksaveasfilename", return_value=str(target)) as ask:
+                agent._save_transcript()
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "You: hi\n\nAssistant: hello\n\n")
+            self.assertEqual(ask.call_args.kwargs["initialdir"], folder)
+            self.assertEqual(ask.call_args.kwargs["defaultextension"], ".txt")
+        agent.status.set.assert_called_once_with(f"Saved output to {target}")
+
+    def test_cancelled_dialog_writes_nothing(self) -> None:
+        agent = self._agent("text")
+        with patch("app.filedialog.asksaveasfilename", return_value=""):
+            agent._save_transcript()
+        agent.status.set.assert_not_called()
+
+    def test_empty_transcript_is_not_saved(self) -> None:
+        agent = self._agent("  \n")
+        with patch("app.filedialog.asksaveasfilename") as ask:
+            agent._save_transcript()
+        ask.assert_not_called()
+        agent.status.set.assert_called_once()
+
+    def test_write_errors_are_reported(self) -> None:
+        agent = self._agent("text")
+        with patch("app.filedialog.asksaveasfilename", return_value="/nonexistent-dir/out.txt"):
+            agent._save_transcript()
+        self.assertIn("Could not save the output", agent.status.set.call_args.args[0])
+
+
 class AppVersionTests(unittest.TestCase):
     def test_app_title_includes_version(self) -> None:
         with patch("app.get_app_version", return_value="v1.2.3"):
@@ -1639,6 +1680,137 @@ class ToolCallResponseTests(unittest.TestCase):
         self.assertIn("Its window is open", completed[0][0])
         self.assertIsNone(completed[0][1])
 
+    def test_actions_after_launch_keep_the_model_final_answer(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.messages = [
+            {"role": "system", "content": "Desktop instructions."},
+            {"role": "user", "content": "(1) Open Google Chrome.\n(2) Press Ctrl+T."},
+        ]
+        agent.root = Mock()
+        agent.screenshot_image_size = (1024, 576)
+        agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+        completed = []
+        agent._finish = lambda answer, error: completed.append((answer, error))
+        application = DesktopApplication(
+            "Google Chrome",
+            "google-chrome.desktop",
+            Path("/usr/share/applications/google-chrome.desktop"),
+        )
+        agent.last_launched_application = application
+        agent._chat = Mock(
+            side_effect=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "list_applications",
+                                    "arguments": {},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "launch_application",
+                                    "arguments": {"title_or_app": "Google Chrome"},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": "list_windows", "arguments": {}}}
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "activate_window",
+                                    "arguments": {"title_or_app": "Google Chrome"},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "press_key",
+                                    "arguments": {"key": "ctrl+t"},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {"message": {"role": "assistant", "content": "Opened a new tab."}},
+            ]
+        )
+        agent._execute_tool = Mock(
+            side_effect=[
+                ("Screenshot captured.", ["screenshot"]),
+                (
+                    json.dumps(
+                        [
+                            {
+                                "name": application.name,
+                                "desktop_id": application.desktop_id,
+                            }
+                        ]
+                    ),
+                    None,
+                ),
+                (f"Launched {application.name!r}.", None),
+                (
+                    json.dumps(
+                        [{"application": application.name, "title": "Google Chrome"}]
+                    ),
+                    None,
+                ),
+                ("Brought 'Google Chrome' to the foreground.", None),
+                ("Screenshot captured.", ["/9j/ZXhhbXBsZQ=="]),
+                ("Pressed ctrl+t.", None),
+                ("Screenshot captured.", ["/9j/ZXhhbXBsZQ=="]),
+            ]
+        )
+
+        with TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            agent._run_turn(
+                "http://localhost:11434", "llama3.1:8b", "Desktop control"
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in agent._execute_tool.call_args_list],
+            [
+                "take_screenshot",
+                "list_applications",
+                "launch_application",
+                "list_windows",
+                "activate_window",
+                "take_screenshot",
+                "press_key",
+                "take_screenshot",
+            ],
+        )
+        self.assertEqual(completed[0][0], "Opened a new tab.")
+        self.assertIsNone(completed[0][1])
+
     def test_close_window_turn_does_not_repeat_model_success_claim(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.messages = [
@@ -2381,6 +2553,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.model_selector = Mock()
         agent.send_button = Mock()
         agent.new_chat_button = Mock()
+        agent.save_transcript_button = Mock()
         agent.mode_buttons = []
         agent.prompt = Mock()
         agent.url_entry = Mock()
@@ -2592,6 +2765,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.screen_observed = False
         agent.send_button = Mock()
         agent.new_chat_button = Mock()
+        agent.save_transcript_button = Mock()
         agent.model_selector = Mock()
         agent.url_entry = Mock()
         agent.workspace_button = Mock()
@@ -2813,6 +2987,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.url_entry = Mock()
         agent.model_choice = Mock()
         agent.new_chat_button = Mock()
+        agent.save_transcript_button = Mock()
         agent.send_button = Mock()
         agent.status = Mock()
         agent.workspace = Path(".")
@@ -2835,6 +3010,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.status.set.assert_called_with("qwen3-vl:8b loaded. Ready for a new chat.")
         agent.model_selector.config.assert_called_with(state="readonly")
         agent.url_entry.config.assert_called_once_with(state="normal")
+        agent.save_transcript_button.config.assert_called_once_with(state="normal")
         agent._save_preferences.assert_called_once_with()
 
     def test_failed_model_load_restores_previous_selection(self) -> None:
@@ -2845,6 +3021,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.url_entry = Mock()
         agent.model_choice = Mock()
         agent.new_chat_button = Mock()
+        agent.save_transcript_button = Mock()
         agent.send_button = Mock()
         agent.status = Mock()
         agent.workspace = Path(".")

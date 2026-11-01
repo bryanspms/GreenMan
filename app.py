@@ -1336,7 +1336,7 @@ class DesktopAgent:
             activeforeground=THEME_COLORS["input"],
             disabledforeground=THEME_COLORS["muted_text"],
         )
-        self.new_chat_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.new_chat_button.pack(side=tk.RIGHT)
         workspace_label = (
             str(self.workspace) if self.workspace is not None else "No folder selected"
         )
@@ -1421,6 +1421,21 @@ class DesktopAgent:
             highlightthickness=1,
         )
         self.transcript.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        self.save_transcript_button = tk.Button(
+            self.transcript,
+            text="Save as .txt",
+            command=self._save_transcript,
+            bg=THEME_COLORS["green"],
+            fg=THEME_COLORS["input"],
+            activebackground=THEME_COLORS["green_active"],
+            activeforeground=THEME_COLORS["input"],
+            relief=tk.FLAT,
+            cursor="hand2",
+            disabledforeground=THEME_COLORS["muted_text"],
+        )
+        # Placed on the ScrolledText frame so it floats above the text, left of the scrollbar.
+        self.save_transcript_button.place(relx=1.0, x=-24, y=6, anchor=tk.NE)
+        self.save_transcript_button.lift()
 
         prompt_row = tk.Frame(self.root, padx=10, pady=8)
         prompt_row.pack(fill=tk.X)
@@ -1582,6 +1597,28 @@ class DesktopAgent:
             max(1, screen_height - 80),
         )
         target.geometry(f"{width}x{height}")
+
+    def _save_transcript(self) -> None:
+        content = self.transcript.get("1.0", "end-1c")
+        if not content.strip():
+            self.status.set("The output is empty; nothing to save.")
+            return
+        initial_dir = self.workspace if self.workspace is not None else Path.home()
+        selected = filedialog.asksaveasfilename(
+            title="Save output as text file",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt")],
+            initialdir=str(initial_dir),
+            initialfile="greenman-output.txt",
+        )
+        if not selected:
+            return
+        try:
+            Path(selected).write_text(content, encoding="utf-8")
+        except OSError as error:
+            self.status.set(f"Could not save the output: {error}")
+            return
+        self.status.set(f"Saved output to {selected}")
 
     def _choose_workspace(self) -> None:
         selected = filedialog.askdirectory(title="Choose a folder the assistant may access")
@@ -2234,6 +2271,7 @@ class DesktopAgent:
         self.model_selector.config(state=tk.DISABLED)
         self.url_entry.config(state=tk.DISABLED)
         self.new_chat_button.config(state=tk.DISABLED)
+        self.save_transcript_button.config(state=tk.DISABLED)
         self._update_send_button()
         self.status.set(f"Loading {model}…")
         configured_url = self.url_entry.get().strip()
@@ -2281,6 +2319,7 @@ class DesktopAgent:
         self.model_selector.config(state="readonly")
         self.url_entry.config(state=tk.NORMAL)
         self.new_chat_button.config(state=tk.NORMAL)
+        self.save_transcript_button.config(state=tk.NORMAL)
         if error:
             self.model_choice.set(previous_model)
             self._append("Error", error)
@@ -2494,6 +2533,7 @@ class DesktopAgent:
         self._update_send_button()
         self.workspace_button.config(state=tk.DISABLED)
         self.new_chat_button.config(state=tk.DISABLED)
+        self.save_transcript_button.config(state=tk.DISABLED)
         self.model_selector.config(state=tk.DISABLED)
         self.url_entry.config(state=tk.DISABLED)
         for button in self.mode_buttons:
@@ -2607,6 +2647,7 @@ class DesktopAgent:
             applications_listed = False
             launched_application: DesktopApplication | None = None
             launch_verified_present: bool | None = None
+            actions_after_launch = False
             last_verification_path: Path | None = None
             tool_trace: list[str] = []
             previous_blocked_action: tuple[str, str] | None = None
@@ -2969,7 +3010,7 @@ class DesktopAgent:
                                 "answer. No action was run. Try a different model."
                             )
                     self.messages.append(message)
-                    if launched_application is not None:
+                    if launched_application is not None and not actions_after_launch:
                         if launch_verified_present is True:
                             answer = (
                                 f"Opened {launched_application.name!r}. Its window "
@@ -3208,6 +3249,10 @@ class DesktopAgent:
                             and not result.startswith("Action blocked:")
                         ):
                             desktop_action_sent = True
+                            if name == "launch_application":
+                                actions_after_launch = False
+                            elif launched_application is not None:
+                                actions_after_launch = True
                         if result.startswith("Action blocked:"):
                             blocked_action = (str(name), result)
                             focus_blocked_by_window = (
@@ -4189,6 +4234,7 @@ class DesktopAgent:
         self.workspace_button.config(state=tk.NORMAL)
         self._update_send_button()
         self.new_chat_button.config(state=tk.NORMAL)
+        self.save_transcript_button.config(state=tk.NORMAL)
         self._update_mode_buttons()
 
 
