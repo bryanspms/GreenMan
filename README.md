@@ -1,10 +1,8 @@
 # Green Man
 
-![GreenMan](greenMan.png)
-
-Green Man is a local Linux desktop assistant that connects to a local Ollama server and helps you interact with your desktop, files, and applications through a simple graphical interface.
-
-It is designed for privacy-conscious, local-first workflows. The assistant runs on your machine, keeps file access inside a selected workspace, and requires explicit approval before desktop actions, file writes, or shell commands are executed.
+|                         |                                |
+|-------------------------|--------------------------------|
+|<img src="greenMan.png" alt="Green Man" width="600">|Green Man is a local Linux desktop assistant that connects to a local Ollama server and helps you interact with your desktop, files, and applications through a simple graphical interface.  It is designed for privacy-conscious, local-first workflows. The assistant runs on your machine, keeps file access inside a selected workspace, and requires explicit approval before desktop actions, file writes, or shell commands are executed. |
 
 ## Features
 
@@ -192,21 +190,24 @@ downloading a Vosk model and placing its extracted folder at that path.
 2. Select an assistant mode:
    - Questions only
    - Screenshot
-   - Desktop control
-     On Wayland, **Screenshot** requests screen-capture access only; **Desktop
+   - Desktop control (Note that this section is constantly being updated with new capabilities, so if something seems to not work, please use the followchart below.)
+
+      - On Wayland, **Screenshot** requests screen-capture access only; **Desktop
      control** also requests pointer and keyboard access.
-     Use **list_windows** to locate windows by application and title, including
-     windows behind Green Man. Use **activate_window** to bring one forward,
+      - Use **list_windows** to locate windows by application and title, including
+     windows behind Green Man. 
+      - Use **activate_window** to bring one forward,
      **close_named_window** to close it, and **list_applications** /
      **launch_application** to open an installed desktop app. Green Man shows the
      resolved window or app in its approval dialog before activation, closing, or
-     launch. For controls inside a window, activate it first, then use the fresh
+     launch. 
+      - For controls inside a window, activate it first, then use the fresh
      screenshot for clicks and typing. A close request is verified by checking
      whether the title is still in the accessible window list; that does not prove
      the entire application process has exited. Screenshots after visual clicks
      and typing are saved to
-     `~/.cache/greenman/last-desktop-verification.jpg`; desktop screenshots may
-     contain private information.
+     `~/.cache/greenman/last-desktop-verification.jpg`; **desktop screenshots may
+     contain private information.**
 
      ```mermaid
      flowchart TD
