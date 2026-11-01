@@ -29,6 +29,8 @@ from app import (
     calculate_cpu_utilization,
     format_elapsed_timer,
     format_elapsed_time,
+    get_app_title,
+    get_app_version,
     is_desktop_action_request,
     is_valid_workspace,
     is_text_tool_call,
@@ -515,6 +517,37 @@ class OllamaUrlTests(unittest.TestCase):
         for url in ("https://localhost:11434", "http://example.com", "http://192.168.1.5:11434"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 local_ollama_url(url)
+
+
+class AppVersionTests(unittest.TestCase):
+    def test_app_title_includes_version(self) -> None:
+        with patch("app.get_app_version", return_value="v1.2.3"):
+            self.assertEqual(
+                get_app_title(), "Local Green Man Assistant - v1.2.3"
+            )
+
+    def test_reads_version_from_latest_reachable_git_tag(self) -> None:
+        with patch(
+            "app.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="v1.2.3\n", stderr=""
+            ),
+        ) as run:
+            version = get_app_version()
+
+        self.assertEqual(version, "v1.2.3")
+        self.assertEqual(
+            run.call_args.args[0], ["git", "describe", "--tags", "--abbrev=0"]
+        )
+
+    def test_uses_dev_when_no_git_tag_is_available(self) -> None:
+        with patch(
+            "app.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["git"], returncode=128, stdout="", stderr="no tags"
+            ),
+        ):
+            self.assertEqual(get_app_version(), "dev")
 
 
 class ToolCallResponseTests(unittest.TestCase):

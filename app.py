@@ -32,6 +32,28 @@ from window_accessibility import AccessibleWindow, AccessibleWindowController
 
 IMAGE_DROP_HINT = "Drop a PNG, JPEG, or WebP image onto the message box to attach it."
 DEFAULT_VOSK_MODEL = "vosk-model-small-en-us-0.15"
+APP_TITLE = "Local Green Man Assistant"
+
+
+def get_app_version() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "dev"
+    if result.returncode != 0:
+        return "dev"
+    return result.stdout.strip() or "dev"
+
+
+def get_app_title() -> str:
+    return f"{APP_TITLE} - {get_app_version()}"
 
 
 SYSTEM_PROMPT = """You are a local desktop assistant. Answer conversational questions
@@ -1136,7 +1158,7 @@ class QueryCancelled(RuntimeError):
 class DesktopAgent:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Local Green Man Assistant")
+        self.root.title(get_app_title())
         self.window_icon = set_window_icon(
             self.root, Path(__file__).with_name("greenMan.png")
         )
@@ -3697,9 +3719,7 @@ class DesktopAgent:
                 controller = AccessibleWindowController()
                 self.window_controller = controller
             root = getattr(self, "root", None)
-            protected_title = (
-                root.title() if root is not None else "Local Green Man Assistant"
-            )
+            protected_title = root.title() if root is not None else get_app_title()
             selected_window = controller.select_window(
                 controller.list_windows(),
                 self._title_or_app(args),
@@ -3724,9 +3744,7 @@ class DesktopAgent:
             assert selected_window is not None
             controller = self.window_controller
             root = getattr(self, "root", None)
-            protected_title = (
-                root.title() if root is not None else "Local Green Man Assistant"
-            )
+            protected_title = root.title() if root is not None else get_app_title()
             shell_windows = getattr(self, "shell_windows", None)
             if shell_windows is None:
                 shell_windows = GnomeShellWindows()

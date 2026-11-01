@@ -272,6 +272,18 @@ This is not a sandbox. Approved commands can still affect other parts of the sys
 python3 -m unittest
 ```
 
+## Versioning
+
+The main window title shows the app version, taken from the latest Git tag
+reachable from the checked-out commit. Set or bump it by tagging a release:
+
+```bash
+git tag -a v1.0.0 -m "Version 1.0.0"
+git push origin v1.0.0
+```
+
+When no tag is available, such as in a copy without Git history, the title shows `dev`.
+
 ## Contributing
 
 Contributions are welcome. Please open a pull request with a clear explanation of the change and its purpose.
