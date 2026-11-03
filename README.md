@@ -13,6 +13,7 @@
 - Read, write, and inspect files within a chosen folder
 - Run shell commands with explicit approval
 - Optional spoken assistant responses
+- Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows
 - Editable, persistent system prompt
 - Support for both X11 and Wayland sessions
 - Persistent local preferences for model, mode, workspace, and voice setting
@@ -24,6 +25,8 @@ flowchart LR
     User[User]
     subgraph App[Green Man]
         UI[Tkinter UI]
+        Face[Animated face - face.py]
+        Speech[Speech player - speech.py]
         Turn[Query worker]
         Guard[Mode checks and approvals]
         Files[Workspace tools]
@@ -39,6 +42,9 @@ flowchart LR
 
     User --> UI
     UI --> Turn
+    UI --> Face
+    UI --> Speech
+    Speech -- audio levels --> Face
     Turn <--> Ollama
     Turn --> Guard
     Guard --> Files
@@ -202,7 +208,10 @@ downloading a Vosk model and placing its extracted folder at that path.
      **close_named_window** to close it, and **list_applications** /
      **launch_application** to open an installed desktop app. Green Man shows the
      resolved window or app in its approval dialog before activation, closing, or
-     launch. 
+     launch. After a launch, Green Man reports the exact title of the window that
+     opened (or tells the model to use **list_windows** if none appeared), so a
+     follow-up **activate_window** targets the new window and not another window
+     of the same app.
       - For controls inside a window, activate it first, then use the fresh
      screenshot for clicks and typing. A close request is verified by checking
      whether the title is still in the accessible window list; that does not prove
@@ -250,6 +259,32 @@ again to stop. Review or edit the recognized text before sending.
 Spoken responses are disabled by default. The voice selection is saved with your
 local preferences. **System voice** uses `espeak-ng`, `espeak`, or `spd-say` from
 Speech Dispatcher.
+
+### Animated face
+
+The Green Man face at the top left is drawn with Tkinter and is always animated:
+his eyes glance around while idle. While a response is spoken aloud, his eyes
+settle on the user, his mouth opens and closes, and his eyebrows lift for
+emphasis.
+
+With a Piper voice, the mouth follows the loudness of the generated audio, so it
+matches the actual speech. With the **System voice** engines (`espeak-ng`,
+`espeak`, `spd-say`) the audio is not available to analyze, so the mouth moves at
+a steady rhythm instead. If the mouth seems ahead of or behind the voice, adjust
+`MOUTH_SYNC_LATENCY_SECONDS` in `face.py`.
+
+## Project Layout
+
+| File | Purpose |
+|------|---------|
+| `app.py` | Main window, Ollama chat, tools, approvals, preferences |
+| `face.py` | `GreenManFace`: the animated face (eyes, mouth, eyebrows) |
+| `speech.py` | `SpeechPlayer`: Piper and system speech, and lip-sync loudness analysis |
+| `desktop_applications.py` | Installed application discovery and launching |
+| `wayland_portal.py` | Wayland screenshot and input through the XDG portal |
+| `gnome_shell_windows.py` | GNOME Shell window activation |
+| `window_accessibility.py` | Window listing and closing through AT-SPI |
+| `test_*.py` | Unit tests for each module |
 
 The assistant will prompt for approval before performing desktop actions, writing files, or running shell commands.
 
