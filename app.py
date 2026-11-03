@@ -11,8 +11,6 @@ import re
 import shutil
 import socket
 import subprocess
-import sys
-import tempfile
 import threading
 import tkinter as tk
 import time
@@ -24,6 +22,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from face import GreenManFace
+from speech import SpeechPlayer
 from desktop_applications import DesktopApplication, DesktopApplicationLauncher
 from wayland_portal import WaylandDesktopPortal
 from gnome_shell_windows import GnomeShellWindows
@@ -856,15 +856,27 @@ def missing_desktop_steps(request: str, completed_tools: set[str]) -> list[str]:
         "focus_window",
     }:
         missing.append("focus the target window (list_windows, then activate_window)")
-    if re.search(r"\bpress\b|\bctrl\s*\+|\bshortcut\b|\bhotkey\b", text):
+    if re.search(
+        r"\bpress\b|\bctrl\s*\+|\bshortcut\b|\bhotkey\b"
+        r"|\bsend\b.*\b(?:key|enter|ctrl|alt|tab|return)\b",
+        text,
+    ):
         if "press_key" not in completed_tools:
             missing.append("press the key/shortcut (press_key)")
-    if re.search(r"\b(type|add text|enter text|write|insert)\b", text):
+    if re.search(r"\b(type|add text|enter (?:the )?text|write|insert)\b", text):
         if "type_text" not in completed_tools:
             missing.append("type the text (type_text)")
     if re.search(r"\bwait\b", text) and "wait" not in completed_tools:
         missing.append("wait as requested (wait)")
     return missing
+
+
+def has_followup_action(request: str) -> bool:
+    """True when a request asks for more than its first clause, e.g. 'open X and type Y'."""
+    clauses = re.split(
+        r"(?:[.;!?]\s+|\s+(?:and then|then|and)\s+)", request.strip().casefold()
+    )
+    return any(is_desktop_action_request(clause) for clause in clauses[1:])
 
 
 def is_desktop_action_request(content: str) -> bool:
@@ -1183,9 +1195,16 @@ class DesktopAgent:
         self.cancel_event: Event | None = None
         self.active_response = None
         self.active_response_lock = Lock()
-        self.speech_process: subprocess.Popen | None = None
-        self.speech_process_lock = Lock()
-        self.speech_cancel_event: Event | None = None
+        self.speech = SpeechPlayer(
+            lambda: self.voice_model_path,
+            on_start=lambda envelope, window: self.root.after(
+                0, self.face.start_speaking, envelope, window
+            ),
+            on_stop=lambda: self.root.after(0, self.face.stop_speaking),
+            on_error=lambda message, event: self.root.after(
+                0, self._report_voice_error, message, event
+            ),
+        )
         self.listening_event: Event | None = None
         self.is_listening = False
         self.working_status_after: str | None = None
@@ -1272,17 +1291,18 @@ class DesktopAgent:
         )
 
     def _build_ui(self) -> None:
-        self.brand_icon = self.window_icon.subsample(4, 4)
         brand_row = tk.Frame(self.root, padx=10)
         brand_row.pack(fill=tk.X, pady=(6, 0))
+        self.face = GreenManFace(
+            self.root, brand_row, THEME_COLORS, brand_row.cget("bg")
+        )
+        self.face.canvas.pack(side=tk.LEFT)
         tk.Label(
             brand_row,
-            image=self.brand_icon,
             text="Local Green Man Assistant",
-            compound=tk.LEFT,
             font=("TkDefaultFont", 11, "bold"),
             fg=THEME_COLORS["green"],
-        ).pack(side=tk.LEFT)
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         settings = tk.Frame(self.root, padx=10, pady=8)
         settings.pack(fill=tk.X)
@@ -1787,12 +1807,12 @@ class DesktopAgent:
                 )
                 return
             self.voice_model_path = model_path
-        self._stop_speech()
+        self.speech.stop()
         self._save_preferences()
 
     def _on_voice_toggled(self) -> None:
         if self.voice_enabled.get():
-            error = self._voice_availability_error()
+            error = self.speech.availability_error()
             if error:
                 self.voice_enabled.set(False)
                 messagebox.showerror(
@@ -1802,7 +1822,7 @@ class DesktopAgent:
                 )
                 return
         else:
-            self._stop_speech()
+            self.speech.stop()
         self._save_preferences()
 
     def _draw_microphone_icon(self) -> None:
@@ -1978,180 +1998,6 @@ class DesktopAgent:
             self.status.set(error)
         elif not self.busy:
             self.status.set("Dictation stopped. Review the text, then send.")
-
-    def _stop_speech(self) -> None:
-        cancel_event = getattr(self, "speech_cancel_event", None)
-        if cancel_event is not None:
-            cancel_event.set()
-        process_lock = getattr(self, "speech_process_lock", None)
-        if process_lock is None:
-            return
-        with process_lock:
-            process = self.speech_process
-        if process is not None and process.poll() is None:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-
-    @staticmethod
-    def _speech_engine() -> tuple[str, list[str]] | None:
-        for name in ("espeak-ng", "espeak"):
-            executable = shutil.which(name)
-            if executable:
-                return executable, ["--stdin"]
-        executable = shutil.which("spd-say")
-        if executable:
-            return executable, ["--pipe-mode", "--wait"]
-        return None
-
-    def _voice_availability_error(self) -> str | None:
-        voice_model = getattr(self, "voice_model_path", None)
-        if voice_model is not None:
-            if not voice_model.is_file():
-                return f"The selected Piper voice model was not found:\n{voice_model}"
-            config_path = Path(f"{voice_model}.json")
-            if not config_path.is_file():
-                return f"The Piper voice configuration was not found:\n{config_path}"
-            if importlib.util.find_spec("piper") is None:
-                return (
-                    "Install Piper in this Python environment with "
-                    "`python -m pip install piper-tts`."
-                )
-            if not self._audio_player():
-                return (
-                    "Piper needs an audio player. Install pw-play, paplay, "
-                    "aplay, or ffplay."
-                )
-            return None
-        if not self._speech_engine():
-            return (
-                "Install espeak-ng or speech-dispatcher to enable spoken responses."
-            )
-        return None
-
-    @staticmethod
-    def _audio_player() -> tuple[str, list[str]] | None:
-        for name in ("pw-play", "paplay", "aplay"):
-            executable = shutil.which(name)
-            if executable:
-                return executable, []
-        executable = shutil.which("ffplay")
-        if executable:
-            return executable, ["-nodisp", "-autoexit", "-loglevel", "error"]
-        return None
-
-    def _run_speech_process(
-        self,
-        command: list[str],
-        cancel_event: Event,
-        *,
-        input_text: str | None = None,
-        discard_stdout: bool = False,
-    ) -> int | None:
-        if cancel_event.is_set():
-            return None
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL if discard_stdout else None,
-            text=input_text is not None,
-        )
-        with self.speech_process_lock:
-            self.speech_process = process
-            if cancel_event.is_set():
-                try:
-                    process.terminate()
-                except ProcessLookupError:
-                    pass
-        try:
-            process.communicate(input=input_text)
-            return process.returncode
-        finally:
-            with self.speech_process_lock:
-                if self.speech_process is process:
-                    self.speech_process = None
-
-    def _speak_with_piper(self, text: str, cancel_event: Event) -> None:
-        voice_model = self.voice_model_path
-        assert voice_model is not None
-        player = self._audio_player()
-        if importlib.util.find_spec("piper") is None or player is None:
-            raise FileNotFoundError(
-                self._voice_availability_error()
-                or "Piper speech dependencies are unavailable."
-            )
-        temporary_path: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as output:
-                temporary_path = output.name
-            result = self._run_speech_process(
-                [
-                    sys.executable,
-                    "-m",
-                    "piper",
-                    "--model",
-                    str(voice_model),
-                    "--output-file",
-                    temporary_path,
-                ],
-                cancel_event,
-                input_text=text,
-                discard_stdout=True,
-            )
-            if cancel_event.is_set():
-                return
-            if result:
-                raise RuntimeError(f"Piper exited with status {result}.")
-            player_executable, player_arguments = player
-            result = self._run_speech_process(
-                [player_executable, *player_arguments, temporary_path],
-                cancel_event,
-                discard_stdout=True,
-            )
-            if result and not cancel_event.is_set():
-                raise RuntimeError(
-                    f"Audio player exited with status {result}."
-                )
-        finally:
-            if temporary_path is not None:
-                Path(temporary_path).unlink(missing_ok=True)
-
-    def _speak_response(self, text: str, cancel_event: Event) -> None:
-        if cancel_event.is_set():
-            return
-        try:
-            voice_model = getattr(self, "voice_model_path", None)
-            if voice_model is not None:
-                self._speak_with_piper(text, cancel_event)
-                return
-            speech_engine = self._speech_engine()
-            if speech_engine is None:
-                raise FileNotFoundError(
-                    "Install espeak-ng or speech-dispatcher to enable spoken responses."
-                )
-            executable, arguments = speech_engine
-            result = self._run_speech_process(
-                [executable, *arguments],
-                cancel_event,
-                input_text=text,
-                discard_stdout=executable.endswith("spd-say"),
-            )
-            if result and not cancel_event.is_set():
-                self.root.after(
-                    0,
-                    self._report_voice_error,
-                    f"Speech engine exited with status {result}.",
-                    cancel_event,
-                )
-        except (OSError, RuntimeError) as error:
-            if not cancel_event.is_set():
-                self.root.after(
-                    0, self._report_voice_error, str(error), cancel_event
-                )
-        finally:
-            if self.speech_cancel_event is cancel_event:
-                self.speech_cancel_event = None
 
     def _report_voice_error(
         self, error: str, cancel_event: Event | None = None
@@ -2437,7 +2283,7 @@ class DesktopAgent:
     def _new_chat(self) -> None:
         if self.busy:
             return
-        self._stop_speech()
+        self.speech.stop()
         self.messages = [{"role": "system", "content": self.system_prompt}]
         self.screen_observed = False
         self.window_focus_ready = False
@@ -2666,6 +2512,7 @@ class DesktopAgent:
             multi_step_request = bool(
                 missing_desktop_steps(desktop_request, set())
                 or len(re.findall(r"(?m)^\s*\(?\d+[.)]", desktop_request)) > 1
+                or has_followup_action(desktop_command)
             )
             close_requested = bool(
                 not multi_step_request
@@ -3867,12 +3714,23 @@ class DesktopAgent:
 
         if name == "launch_application":
             assert selected_application is not None
+            existing_windows = self._current_windows()
             self.application_launcher.launch(selected_application)
             self.last_launched_application = selected_application
-            self._wait_for_application_window(selected_application)
+            new_titles = self._wait_for_application_window(
+                selected_application, existing_windows
+            )
+            if new_titles:
+                titles = "; ".join(repr(title) for title in new_titles)
+                return (
+                    f"Launched {selected_application.name!r}. Its new window title "
+                    f"is {titles}. Use exactly that title with activate_window.",
+                    None,
+                )
             return (
-                f"Launched {selected_application.name!r}. Check list_windows to "
-                "verify whether its window opened.",
+                f"Launched {selected_application.name!r}, but no new window "
+                "appeared; it may have reused an existing window. Call "
+                "list_windows to find the exact title.",
                 None,
             )
 
@@ -4063,28 +3921,44 @@ class DesktopAgent:
             "or application name, e.g. {\"title_or_app\": \"Text Editor\"}."
         )
 
-    def _wait_for_application_window(
-        self, application: DesktopApplication, timeout: float = 10.0
-    ) -> None:
+    def _current_windows(self) -> set[tuple[str, str]]:
         controller = getattr(self, "window_controller", None)
         if controller is None:
             controller = AccessibleWindowController()
             self.window_controller = controller
+        try:
+            return {
+                (window.application, window.title)
+                for window in controller.list_windows()
+            }
+        except Exception:
+            return set()
+
+    def _wait_for_application_window(
+        self,
+        application: DesktopApplication,
+        existing_windows: set[tuple[str, str]],
+        timeout: float = 10.0,
+    ) -> list[str]:
+        """Wait for windows that did not exist before launch; return their titles."""
         name = application.name.casefold()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._raise_if_cancelled()
-            try:
-                if any(
-                    name in window.application.casefold()
-                    or name in window.title.casefold()
-                    for window in controller.list_windows()
-                ):
-                    time.sleep(0.5)
-                    return
-            except Exception:
-                pass
+            new_titles = sorted(
+                title
+                for app_name, title in self._current_windows() - existing_windows
+                if name in app_name.casefold() or name in title.casefold()
+            )
+            if new_titles:
+                time.sleep(0.5)
+                return sorted(
+                    title
+                    for app_name, title in self._current_windows() - existing_windows
+                    if name in app_name.casefold() or name in title.casefold()
+                ) or new_titles
             time.sleep(0.5)
+        return []
 
     def _request_approval(self, name: str, args: dict) -> bool:
         if name in DESKTOP_ACTIONS and self.remember_desktop_approvals:
@@ -4215,13 +4089,7 @@ class DesktopAgent:
             self.status.set("Ready.")
             voice_enabled = getattr(self, "voice_enabled", None)
             if answer and voice_enabled is not None and voice_enabled.get():
-                cancel_event = Event()
-                self.speech_cancel_event = cancel_event
-                threading.Thread(
-                    target=self._speak_response,
-                    args=(answer, cancel_event),
-                    daemon=True,
-                ).start()
+                self.speech.speak_async(answer)
         if turn_started_at is not None:
             elapsed_seconds = max(0.0, time.monotonic() - turn_started_at)
             self._append("Query Duration", format_elapsed_time(elapsed_seconds))

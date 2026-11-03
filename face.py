@@ -1,0 +1,245 @@
+"""Animated Green Man face drawn on a Tkinter canvas."""
+
+from __future__ import annotations
+
+import math
+import random
+import time
+import tkinter as tk
+from collections.abc import Mapping
+
+FACE_WIDTH = 130
+FACE_HEIGHT = 130
+MOUTH_FRAME_MS = 33
+EYE_FRAME_MS = 40
+MOUTH_SYNC_LATENCY_SECONDS = 0.08
+
+
+class GreenManFace:
+    """A leafy face whose eyes wander and whose mouth and brows follow speech."""
+
+    def __init__(
+        self,
+        root: tk.Misc,
+        parent: tk.Misc,
+        colors: Mapping[str, str],
+        background: str,
+    ) -> None:
+        self.root = root
+        self.colors = colors
+        self.background = background
+        self.canvas = tk.Canvas(
+            parent,
+            width=FACE_WIDTH,
+            height=FACE_HEIGHT,
+            highlightthickness=0,
+            bg=background,
+        )
+        self.speaking = False
+        self.mouth_level = 0.0
+        self._mouth_after: str | None = None
+        self._eye_after: str | None = None
+        self._pupils: list[tuple[int, float, float]] = []
+        self._brows: list[tuple[int, float, float]] = []
+        self._draw()
+        self._start_eye_animation()
+
+    def start_speaking(
+        self, envelope: list[float] | None, window_seconds: float = 0.04
+    ) -> None:
+        """Animate the mouth from an audio envelope, or flap it if none."""
+        self.stop_speaking()
+        self.speaking = True
+        started_at = time.monotonic() + MOUTH_SYNC_LATENCY_SECONDS
+        phase = 0
+        brow_lifts = [0.0, 0.0]
+        emphasis = [0.0, 0.0]
+        ticks_until_emphasis = 15
+
+        def tick() -> None:
+            nonlocal phase, ticks_until_emphasis
+            phase += 1
+            if envelope is not None:
+                index = int((time.monotonic() - started_at) / window_seconds)
+                target = envelope[index] if 0 <= index < len(envelope) else 0.0
+            else:
+                target = 0.5 + 0.5 * math.sin(phase * 0.9)
+            rate = 0.6 if target > self.mouth_level else 0.3
+            self._set_mouth(self.mouth_level + (target - self.mouth_level) * rate)
+
+            ticks_until_emphasis -= 1
+            if ticks_until_emphasis <= 0 and target > 0.4:
+                strength = random.uniform(0.5, 1.0)
+                favored = random.randint(0, 1)
+                emphasis[favored] = strength
+                emphasis[1 - favored] = strength * random.uniform(0.3, 1.0)
+                ticks_until_emphasis = random.randint(15, 45)
+            for side in (0, 1):
+                goal = min(1.0, 0.25 * target + emphasis[side])
+                brow_lifts[side] += (goal - brow_lifts[side]) * 0.3
+                emphasis[side] *= 0.88
+            self._set_brows((brow_lifts[0], brow_lifts[1]))
+            self._mouth_after = self.root.after(MOUTH_FRAME_MS, tick)
+
+        tick()
+
+    def stop_speaking(self) -> None:
+        if self._mouth_after is not None:
+            self.root.after_cancel(self._mouth_after)
+            self._mouth_after = None
+        self.speaking = False
+        self._set_mouth(0.0)
+        self._set_brows((0.0, 0.0))
+
+    def _draw_leaf(
+        self,
+        base_x: float,
+        base_y: float,
+        angle_degrees: float,
+        length: float,
+        width: float,
+        fill: str,
+    ) -> None:
+        angle = math.radians(angle_degrees)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        steps = 8
+        side_a: list[tuple[float, float]] = []
+        side_b: list[tuple[float, float]] = []
+        for step in range(steps + 1):
+            t = step / steps
+            half = (
+                width / 2 * math.sin(math.pi * t) * (1 + 0.25 * math.sin(6 * math.pi * t))
+            )
+            along = length * t
+            side_a.append((along, half))
+            side_b.append((along, -half))
+        points: list[float] = []
+        for along, across in side_a + side_b[::-1]:
+            points.extend(
+                (
+                    base_x + along * cos_a - across * sin_a,
+                    base_y + along * sin_a + across * cos_a,
+                )
+            )
+        self.canvas.create_polygon(
+            points, fill=fill, outline=self.background, smooth=True
+        )
+        self.canvas.create_line(
+            base_x,
+            base_y,
+            base_x + length * 0.9 * cos_a,
+            base_y + length * 0.9 * sin_a,
+            fill=self.colors["green_selected"],
+        )
+
+    def _draw(self) -> None:
+        canvas = self.canvas
+        center_x, center_y = FACE_WIDTH / 2, FACE_HEIGHT * 0.52
+        dark_green = self.colors["text"]
+        green = self.colors["green"]
+        light = self.colors["green_selected"]
+        for angle in range(0, 360, 30):
+            self._draw_leaf(center_x, center_y, angle - 90, 58, 26, dark_green)
+        for angle in range(15, 375, 30):
+            self._draw_leaf(center_x, center_y, angle - 90, 44, 22, green)
+        self._draw_leaf(center_x, center_y - 20, -90, 52, 20, dark_green)
+        for sign in (-1, 1):
+            canvas.create_line(
+                center_x + sign * 36, center_y - 30,
+                center_x + sign * 50, center_y - 44,
+                center_x + sign * 58, center_y - 40,
+                smooth=True, fill=dark_green, width=2,
+            )
+        for sign in (-1, 1):
+            self._draw_leaf(
+                center_x + sign * 6, center_y + 26, 90 + sign * 55, 34, 14, green
+            )
+            self._draw_leaf(
+                center_x + sign * 10, center_y + 12, 90 + sign * 80, 30, 12, dark_green
+            )
+        canvas.create_oval(
+            center_x - 25, center_y - 33, center_x + 25, center_y + 35,
+            fill=green, outline=dark_green,
+        )
+        canvas.create_polygon(
+            center_x, center_y - 6,
+            center_x - 5, center_y + 14,
+            center_x - 8, center_y + 16,
+            center_x, center_y + 18,
+            center_x + 8, center_y + 16,
+            center_x + 5, center_y + 14,
+            fill=dark_green, outline="", smooth=False,
+        )
+        for sign in (-1, 1):
+            eye_x = center_x + sign * 11
+            brow = canvas.create_line(
+                eye_x - 9, center_y - 12,
+                eye_x, center_y - 17,
+                eye_x + 9, center_y - 12,
+                smooth=True, fill=dark_green, width=3,
+            )
+            self._brows.append((brow, eye_x, center_y))
+            canvas.create_oval(
+                eye_x - 7, center_y - 10, eye_x + 7, center_y - 3,
+                fill=light, outline=dark_green,
+            )
+            pupil = canvas.create_oval(
+                eye_x - 2.5, center_y - 9.5, eye_x + 2.5, center_y - 3.5,
+                fill=dark_green, outline="",
+            )
+            self._pupils.append((pupil, eye_x, center_y - 6.5))
+            self._draw_leaf(
+                center_x + sign * 4, center_y + 24, 90 + sign * 90, 22, 9, dark_green
+            )
+        self._mouth_item = canvas.create_oval(
+            0, 0, 0, 0, fill=dark_green, outline=light
+        )
+        self._set_mouth(0.0)
+
+    def _start_eye_animation(self) -> None:
+        gaze = [0.0, 0.0]
+        target = [0.0, 0.0]
+        ticks_until_shift = 20
+
+        def tick() -> None:
+            nonlocal ticks_until_shift
+            ticks_until_shift -= 1
+            if self.speaking:
+                target[0] = target[1] = 0.0
+                ticks_until_shift = 20
+            elif ticks_until_shift <= 0:
+                target[0] = random.uniform(-3.5, 3.5)
+                target[1] = random.uniform(-1.5, 1.5)
+                ticks_until_shift = random.randint(25, 90)
+            for axis in (0, 1):
+                gaze[axis] += (target[axis] - gaze[axis]) * 0.35
+            for pupil, eye_x, eye_y in self._pupils:
+                x, y = eye_x + gaze[0], eye_y + gaze[1]
+                self.canvas.coords(pupil, x - 2.5, y - 3, x + 2.5, y + 3)
+            self._eye_after = self.root.after(EYE_FRAME_MS, tick)
+
+        tick()
+
+    def _set_mouth(self, level: float) -> None:
+        self.mouth_level = level
+        cx, cy = FACE_WIDTH / 2, FACE_HEIGHT * 0.52 + 25
+        half_width = 13 + 9 * level
+        half_height = 2 + 15 * level
+        self.canvas.coords(
+            self._mouth_item,
+            cx - half_width,
+            cy - half_height,
+            cx + half_width,
+            cy + half_height,
+        )
+
+    def _set_brows(self, lifts: tuple[float, float]) -> None:
+        """Raise each brow by 0-1 (left, right) and arch it as it lifts."""
+        for (brow, eye_x, eye_y), lift in zip(self._brows, lifts):
+            rise = 7 * lift
+            self.canvas.coords(
+                brow,
+                eye_x - 9, eye_y - 12 - rise * 0.6,
+                eye_x, eye_y - 17 - rise,
+                eye_x + 9, eye_y - 12 - rise * 0.8,
+            )

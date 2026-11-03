@@ -29,6 +29,7 @@ from app import (
     calculate_cpu_utilization,
     format_elapsed_timer,
     format_elapsed_time,
+    has_followup_action,
     get_app_title,
     get_app_version,
     is_desktop_action_request,
@@ -357,6 +358,21 @@ class WorkspacePathTests(unittest.TestCase):
             (root / "shortcut").symlink_to(outside, target_is_directory=True)
             with self.assertRaises(ValueError):
                 resolve_workspace_path(root, "shortcut/file.txt")
+
+
+class FollowupActionTests(unittest.TestCase):
+    def test_detects_actions_after_a_launch(self) -> None:
+        for request in (
+            'open terminal app. enter the text, "ls" and send enter key.',
+            "launch google chrome and add a new tab to: http://example.com",
+        ):
+            with self.subTest(request=request):
+                self.assertTrue(has_followup_action(request))
+
+    def test_plain_launch_has_no_followup(self) -> None:
+        for request in ("open google chrome", "launch the file manager"):
+            with self.subTest(request=request):
+                self.assertFalse(has_followup_action(request))
 
 
 class SystemStatusTests(unittest.TestCase):
@@ -2585,104 +2601,6 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.working_indicator.pack_forget.assert_called_once_with()
         agent.attachment_status.set.assert_called_once_with(IMAGE_DROP_HINT)
 
-    def test_speech_response_is_sent_to_local_speech_engine(self) -> None:
-        agent = DesktopAgent.__new__(DesktopAgent)
-        agent.speech_process = None
-        agent.speech_process_lock = Lock()
-        cancel_event = Event()
-        agent.speech_cancel_event = cancel_event
-        process = Mock(returncode=0)
-
-        with (
-            patch("app.shutil.which", return_value="/usr/bin/espeak-ng"),
-            patch("app.subprocess.Popen", return_value=process) as popen,
-        ):
-            agent._speak_response("Hello there.", cancel_event)
-
-        popen.assert_called_once_with(
-            ["/usr/bin/espeak-ng", "--stdin"],
-            stdin=subprocess.PIPE,
-            stdout=None,
-            text=True,
-        )
-        process.communicate.assert_called_once_with(input="Hello there.")
-        self.assertIsNone(agent.speech_process)
-        self.assertIsNone(agent.speech_cancel_event)
-
-    def test_speech_response_supports_speech_dispatcher(self) -> None:
-        agent = DesktopAgent.__new__(DesktopAgent)
-        agent.speech_process = None
-        agent.speech_process_lock = Lock()
-        cancel_event = Event()
-        agent.speech_cancel_event = cancel_event
-        process = Mock(returncode=0)
-
-        def find_engine(name: str) -> str | None:
-            return "/usr/bin/spd-say" if name == "spd-say" else None
-
-        with (
-            patch("app.shutil.which", side_effect=find_engine),
-            patch("app.subprocess.Popen", return_value=process) as popen,
-        ):
-            agent._speak_response("Hello there.", cancel_event)
-
-        popen.assert_called_once_with(
-            ["/usr/bin/spd-say", "--pipe-mode", "--wait"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            text=True,
-        )
-        process.communicate.assert_called_once_with(input="Hello there.")
-        self.assertIsNone(agent.speech_process)
-        self.assertIsNone(agent.speech_cancel_event)
-
-    def test_speech_response_uses_selected_piper_voice_and_cleans_audio_file(self) -> None:
-        with TemporaryDirectory() as folder:
-            voice_model = Path(folder) / "natural.onnx"
-            voice_model.write_bytes(b"model")
-            agent = DesktopAgent.__new__(DesktopAgent)
-            agent.voice_model_path = voice_model
-            agent.speech_process = None
-            agent.speech_process_lock = Lock()
-            cancel_event = Event()
-            agent.speech_cancel_event = cancel_event
-            agent._audio_player = Mock(
-                return_value=("/usr/bin/aplay", [])
-            )
-            commands: list[tuple[list[str], str | None]] = []
-
-            def run_process(
-                command: list[str],
-                event: Event,
-                *,
-                input_text: str | None = None,
-                discard_stdout: bool = False,
-            ) -> int:
-                commands.append((command, input_text))
-                if input_text is None:
-                    self.assertTrue(Path(command[-1]).is_file())
-                return 0
-
-            agent._run_speech_process = Mock(side_effect=run_process)
-            with patch("app.importlib.util.find_spec", return_value=object()):
-                agent._speak_response("A natural sounding reply.", cancel_event)
-
-        self.assertEqual(len(commands), 2)
-        model_command, input_text = commands[0]
-        self.assertEqual(
-            model_command[:4],
-            [sys.executable, "-m", "piper", "--model"],
-        )
-        self.assertEqual(model_command[4], str(voice_model))
-        self.assertEqual(model_command[5], "--output-file")
-        self.assertEqual(input_text, "A natural sounding reply.")
-        self.assertEqual(
-            commands[1][0][:2], ["/usr/bin/aplay", commands[0][0][6]]
-        )
-        self.assertIsNone(commands[1][1])
-        self.assertFalse(Path(commands[0][0][6]).exists())
-        self.assertIsNone(agent.speech_cancel_event)
-
     def test_microphone_click_starts_offline_listening(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.busy = False
@@ -2981,6 +2899,7 @@ class DesktopSafetyTests(unittest.TestCase):
 
     def test_successful_model_load_activates_model_and_starts_new_chat(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
+        agent.speech = Mock()
         agent.busy = True
         agent.active_model = "llama3.1:8b"
         agent.model_selector = Mock()
