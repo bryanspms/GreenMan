@@ -29,6 +29,7 @@ from app import (
     calculate_cpu_utilization,
     format_elapsed_timer,
     format_elapsed_time,
+    format_request_history,
     has_followup_action,
     get_app_title,
     get_app_version,
@@ -358,6 +359,32 @@ class WorkspacePathTests(unittest.TestCase):
             (root / "shortcut").symlink_to(outside, target_is_directory=True)
             with self.assertRaises(ValueError):
                 resolve_workspace_path(root, "shortcut/file.txt")
+
+
+class RequestHistoryTests(unittest.TestCase):
+    def test_empty_history_has_a_placeholder(self) -> None:
+        self.assertIn("No requests", format_request_history([]))
+
+    def test_history_is_numbered_oldest_first(self) -> None:
+        text = format_request_history(
+            [("2026-01-01 09:00:00", "first"), ("2026-01-01 09:05:00", "second")]
+        )
+        self.assertEqual(
+            text,
+            "1. [2026-01-01 09:00:00]\nfirst\n\n2. [2026-01-01 09:05:00]\nsecond",
+        )
+
+    def test_recording_a_request_appends_with_timestamp(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.request_history = []
+        agent._refresh_history_view = Mock()
+        agent._record_request("open chrome")
+        agent._record_request("close it")
+        self.assertEqual(
+            [request for _, request in agent.request_history],
+            ["open chrome", "close it"],
+        )
+        self.assertEqual(agent._refresh_history_view.call_count, 2)
 
 
 class FollowupActionTests(unittest.TestCase):
@@ -2673,6 +2700,8 @@ class DesktopSafetyTests(unittest.TestCase):
 
     def test_send_attaches_dropped_image_to_user_message(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
+        agent.request_history = []
+        agent._refresh_history_view = Mock()
         agent.busy = False
         agent.workspace = Path(".")
         agent.prompt = Mock()

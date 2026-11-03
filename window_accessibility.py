@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +19,10 @@ AT_SPI_COMPONENT = "org.a11y.atspi.Component"
 ACTIVE_STATE = 1 << 0
 ARMED_STATE = 1 << 1
 WINDOW_ROLES = {"alert", "dialog", "frame", "window"}
+FUZZY_MIN_SCORE = 0.78
+FUZZY_MIN_MARGIN = 0.1
+FUZZY_MIN_WORD_SCORE = 0.7
+SUGGESTION_MIN_SCORE = 0.45
 
 
 @dataclass(frozen=True)
@@ -68,7 +74,29 @@ class AccessibleWindowController:
                 ) in normalized
             ]
         if not matches:
-            raise ValueError(f"No accessible window matches {query!r}.")
+            ranked = AccessibleWindowController.rank_windows(windows, query)
+            if (
+                ranked
+                and ranked[0][0] >= FUZZY_MIN_SCORE
+                and (
+                    len(ranked) == 1
+                    or ranked[0][0] - ranked[1][0] >= FUZZY_MIN_MARGIN
+                )
+            ):
+                matches = [ranked[0][1]]
+            else:
+                suggestions = [
+                    window for score, window in ranked[:3]
+                    if score >= SUGGESTION_MIN_SCORE
+                ]
+                message = f"No accessible window matches {query!r}."
+                if suggestions:
+                    options = "\n".join(
+                        f"- {window.application}: {window.title}"
+                        for window in suggestions
+                    )
+                    message += f" Closest windows (use an exact title):\n{options}"
+                raise ValueError(message)
         if len(matches) > 1:
             options = "\n".join(
                 f"- {window.application}: {window.title}" for window in matches
@@ -85,6 +113,45 @@ class AccessibleWindowController:
         ):
             raise ValueError("Green Man's own window cannot be targeted.")
         return target
+
+    @staticmethod
+    def rank_windows(
+        windows: list[AccessibleWindow], query: str
+    ) -> list[tuple[float, AccessibleWindow]]:
+        """Score windows by how closely they resemble a query, best first.
+
+        Each query word is compared with the closest word of the window's
+        application name and title, so typos, missing words and reordered words
+        still score well. A window where any query word has no
+        close counterpart is penalized.
+        """
+
+        def words(text: str) -> list[str]:
+            return re.findall(r"[a-z0-9]+", text.casefold())
+
+        query_words = words(query)
+        if not query_words:
+            return []
+        scored: list[tuple[float, AccessibleWindow]] = []
+        for window in windows:
+            candidates = words(f"{window.application} {window.title}")
+            if not candidates:
+                continue
+            word_scores = [
+                max(
+                    SequenceMatcher(None, word, candidate).ratio()
+                    for candidate in candidates
+                )
+                for word in query_words
+            ]
+            score = sum(word_scores) / len(word_scores)
+            if min(word_scores) < FUZZY_MIN_WORD_SCORE:
+                score *= 0.75
+            scored.append((score, window))
+        return sorted(
+            scored,
+            key=lambda item: (-item[0], item[1].application, item[1].title),
+        )
 
     async def _connect(self) -> tuple[MessageBus, MessageBus]:
         session_bus = await MessageBus().connect()

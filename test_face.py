@@ -45,6 +45,17 @@ class GreenManFaceTests(unittest.TestCase):
         self.assertAlmostEqual((y1 + y2) / 2, eye_y, delta=0.5)
         self.face.stop_speaking()
 
+    def test_eyes_blink_and_reopen(self) -> None:
+        lid = self.face._lids[0][0]
+        states = set()
+        for _ in range(400):
+            self.root.update()
+            states.add(self.face.canvas.itemcget(lid, "state"))
+            self.root.after(40)
+            if {"normal", "hidden"} <= states:
+                break
+        self.assertEqual(states, {"normal", "hidden"})
+
 
 if __name__ == "__main__":
     unittest.main()

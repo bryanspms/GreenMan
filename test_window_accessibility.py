@@ -10,6 +10,13 @@ from window_accessibility import (
 )
 
 
+query_app = {
+    "Gogle Chrome": "Google Chrome",
+    "Visual Studio Cod": "Visual Studio Code",
+    "chrome settings": "Google Chrome",
+}
+
+
 class AccessibleWindowSelectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.windows = [
@@ -61,6 +68,20 @@ class AccessibleWindowSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "matches multiple windows"):
             AccessibleWindowController.select_window(
                 windows, "Google Chrome", "Local Green Man Assistant"
+            )
+
+    def test_misspelled_or_incomplete_names_find_the_closest_window(self) -> None:
+        for query in ("Gogle Chrome", "Visual Studio Cod", "chrome settings"):
+            with self.subTest(query=query):
+                selected = AccessibleWindowController.select_window(
+                    self.windows, query, "Local Green Man Assistant"
+                )
+                self.assertEqual(selected.application, query_app[query])
+
+    def test_unclear_fuzzy_match_suggests_closest_windows(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Closest windows"):
+            AccessibleWindowController.select_window(
+                self.windows, "Visual Chrome", "Local Green Man Assistant"
             )
 
     def test_cannot_select_green_man(self) -> None:

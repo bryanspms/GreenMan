@@ -13,6 +13,8 @@ FACE_HEIGHT = 130
 MOUTH_FRAME_MS = 33
 EYE_FRAME_MS = 40
 MOUTH_SYNC_LATENCY_SECONDS = 0.08
+EYE_HEIGHT = 7
+BLINK_LID_LEVELS = (0.55, 1.0, 1.0, 0.55)
 
 
 class GreenManFace:
@@ -41,6 +43,7 @@ class GreenManFace:
         self._eye_after: str | None = None
         self._pupils: list[tuple[int, float, float]] = []
         self._brows: list[tuple[int, float, float]] = []
+        self._lids: list[tuple[int, float, float]] = []
         self._draw()
         self._start_eye_animation()
 
@@ -188,6 +191,10 @@ class GreenManFace:
                 fill=dark_green, outline="",
             )
             self._pupils.append((pupil, eye_x, center_y - 6.5))
+            lid = canvas.create_oval(
+                0, 0, 0, 0, fill=green, outline=dark_green, state=tk.HIDDEN
+            )
+            self._lids.append((lid, eye_x, center_y - 10))
             self._draw_leaf(
                 center_x + sign * 4, center_y + 24, 90 + sign * 90, 22, 9, dark_green
             )
@@ -200,10 +207,27 @@ class GreenManFace:
         gaze = [0.0, 0.0]
         target = [0.0, 0.0]
         ticks_until_shift = 20
+        ticks_until_blink = random.randint(40, 100)
+        blink_frame = len(BLINK_LID_LEVELS)
 
         def tick() -> None:
-            nonlocal ticks_until_shift
+            nonlocal ticks_until_shift, ticks_until_blink, blink_frame
             ticks_until_shift -= 1
+            ticks_until_blink -= 1
+            if ticks_until_blink <= 0 and blink_frame >= len(BLINK_LID_LEVELS):
+                blink_frame = 0
+                # Occasionally blink twice in quick succession.
+                ticks_until_blink = (
+                    random.randint(5, 8)
+                    if random.random() < 0.2
+                    else random.randint(60, 160)
+                )
+            if blink_frame < len(BLINK_LID_LEVELS):
+                self._set_lids(BLINK_LID_LEVELS[blink_frame])
+                blink_frame += 1
+            elif blink_frame == len(BLINK_LID_LEVELS):
+                self._set_lids(0.0)
+                blink_frame += 1
             if self.speaking:
                 target[0] = target[1] = 0.0
                 ticks_until_shift = 20
@@ -219,6 +243,19 @@ class GreenManFace:
             self._eye_after = self.root.after(EYE_FRAME_MS, tick)
 
         tick()
+
+    def _set_lids(self, closed: float) -> None:
+        """Draw the eyelids over the eyes; 0 is open and 1 is fully closed."""
+        for lid, eye_x, eye_top in self._lids:
+            if closed <= 0:
+                self.canvas.itemconfigure(lid, state=tk.HIDDEN)
+                continue
+            self.canvas.coords(
+                lid,
+                eye_x - 7, eye_top,
+                eye_x + 7, eye_top + EYE_HEIGHT * closed,
+            )
+            self.canvas.itemconfigure(lid, state=tk.NORMAL)
 
     def _set_mouth(self, level: float) -> None:
         self.mouth_level = level

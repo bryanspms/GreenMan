@@ -212,6 +212,11 @@ downloading a Vosk model and placing its extracted folder at that path.
      opened (or tells the model to use **list_windows** if none appeared), so a
      follow-up **activate_window** targets the new window and not another window
      of the same app.
+     When a window name does not match exactly, Green Man falls back to a fuzzy
+     match, so small typos or missing words (for example "Gogle Chrome") still
+     find the intended window. It only does this when one window is clearly the
+     best match; otherwise it lists the closest windows so an exact title can be
+     chosen. Approval dialogs still show the window that was resolved.
       - For controls inside a window, activate it first, then use the fresh
      screenshot for clicks and typing. A close request is verified by checking
      whether the title is still in the accessible window list; that does not prove
@@ -253,6 +258,10 @@ downloading a Vosk model and placing its extracted folder at that path.
    and future chats, and stores it in local preferences.
 6. Send your request.
 
+Click **View History** (beside **Edit system prompt…**) to see every request sent
+during the current session, numbered and time-stamped. The history is kept in
+memory only: it survives **New chat** but is cleared when Green Man closes.
+
 To dictate, click the microphone icon to start listening, speak, then click it
 again to stop. Review or edit the recognized text before sending.
 
@@ -263,7 +272,7 @@ Speech Dispatcher.
 ### Animated face
 
 The Green Man face at the top left is drawn with Tkinter and is always animated:
-his eyes glance around while idle. While a response is spoken aloud, his eyes
+he blinks now and then, and his eyes glance around while idle. While a response is spoken aloud, his eyes
 settle on the user, his mouth opens and closes, and his eyebrows lift for
 emphasis.
 

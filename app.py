@@ -1042,6 +1042,16 @@ def format_elapsed_time(seconds: float) -> str:
     return f"{int(minutes)} min {remaining_seconds:.1f} sec"
 
 
+def format_request_history(entries: list[tuple[str, str]]) -> str:
+    """Render (timestamp, request) pairs as a numbered, oldest-first log."""
+    if not entries:
+        return "No requests have been sent in this session yet."
+    return "\n\n".join(
+        f"{number}. [{timestamp}]\n{request}"
+        for number, (timestamp, request) in enumerate(entries, start=1)
+    )
+
+
 def format_elapsed_timer(seconds: float) -> str:
     elapsed_seconds = max(0, int(seconds))
     minutes, seconds_remainder = divmod(elapsed_seconds, 60)
@@ -1192,6 +1202,8 @@ class DesktopAgent:
         if self.voice_model_path not in self.piper_voice_models:
             self.voice_model_path = None
         self.busy = False
+        self.request_history: list[tuple[str, str]] = []
+        self.history_dialog: tk.Toplevel | None = None
         self.cancel_event: Event | None = None
         self.active_response = None
         self.active_response_lock = Lock()
@@ -1386,6 +1398,15 @@ class DesktopAgent:
             activebackground=THEME_COLORS["green_selected"],
         )
         self.edit_system_prompt_button.pack(side=tk.LEFT, padx=(12, 0))
+        self.view_history_button = tk.Button(
+            voice_toggle_row,
+            text="View History",
+            command=self._open_history_viewer,
+            bg=THEME_COLORS["surface"],
+            fg=THEME_COLORS["text"],
+            activebackground=THEME_COLORS["green_selected"],
+        )
+        self.view_history_button.pack(side=tk.LEFT, padx=(12, 0))
         voice_model_row = tk.Frame(self.root, padx=10, pady=2)
         voice_model_row.pack(fill=tk.X, pady=(0, 6))
         tk.Label(voice_model_row, text="Voice").pack(side=tk.LEFT)
@@ -1666,6 +1687,65 @@ class DesktopAgent:
         )
         if error:
             self.status.set(error)
+
+    def _record_request(self, request: str) -> None:
+        self.request_history.append((time.strftime("%Y-%m-%d %H:%M:%S"), request))
+        self._refresh_history_view()
+
+    def _refresh_history_view(self) -> None:
+        dialog = getattr(self, "history_dialog", None)
+        if dialog is None or not dialog.winfo_exists():
+            return
+        viewer = dialog.history_text
+        viewer.config(state=tk.NORMAL)
+        viewer.delete("1.0", tk.END)
+        viewer.insert("1.0", format_request_history(self.request_history))
+        viewer.see(tk.END)
+        viewer.config(state=tk.DISABLED)
+
+    def _open_history_viewer(self) -> None:
+        dialog = getattr(self, "history_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.deiconify()
+            dialog.lift()
+            self._refresh_history_view()
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Request history")
+        dialog.configure(bg=THEME_COLORS["background"])
+        dialog.transient(self.root)
+        dialog.geometry("640x420")
+        tk.Label(
+            dialog,
+            text="Requests sent during this session (cleared when Green Man closes).",
+            anchor=tk.W,
+            padx=10,
+            pady=8,
+        ).pack(fill=tk.X)
+        viewer = scrolledtext.ScrolledText(
+            dialog,
+            wrap=tk.WORD,
+            bg=THEME_COLORS["input"],
+            fg=THEME_COLORS["text"],
+            selectbackground=THEME_COLORS["green_selected"],
+            selectforeground=THEME_COLORS["text"],
+            relief=tk.FLAT,
+            highlightthickness=1,
+        )
+        button_row = tk.Frame(dialog, padx=10, pady=10)
+        button_row.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Button(
+            button_row,
+            text="Close",
+            command=dialog.destroy,
+            bg=THEME_COLORS["surface"],
+            fg=THEME_COLORS["text"],
+            activebackground=THEME_COLORS["green_selected"],
+        ).pack(side=tk.RIGHT)
+        viewer.pack(fill=tk.BOTH, expand=True, padx=10)
+        dialog.history_text = viewer
+        self.history_dialog = dialog
+        self._refresh_history_view()
 
     def _open_system_prompt_editor(self) -> None:
         dialog = tk.Toplevel(self.root)
@@ -2362,6 +2442,7 @@ class DesktopAgent:
             display_prompt += f" [Image attached: {image_name}]"
         self.prompt.delete("1.0", tk.END)
         self._append("You", display_prompt)
+        self._record_request(display_prompt)
         self.messages.append(message)
         self._clear_pending_image()
         self.screen_observed = False
