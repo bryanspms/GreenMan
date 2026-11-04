@@ -1,7 +1,7 @@
 import tkinter as tk
 import unittest
 
-from face import GreenManFace
+from face import FACE_SCALE, GreenManFace
 
 COLORS = {
     "background": "#e8f1e8",
@@ -41,8 +41,8 @@ class GreenManFaceTests(unittest.TestCase):
             self.root.after(40)
         pupil, eye_x, eye_y = self.face._pupils[0]
         x1, y1, x2, y2 = self.face.canvas.coords(pupil)
-        self.assertAlmostEqual((x1 + x2) / 2, eye_x, delta=0.5)
-        self.assertAlmostEqual((y1 + y2) / 2, eye_y, delta=0.5)
+        self.assertAlmostEqual((x1 + x2) / 2, eye_x * FACE_SCALE, delta=0.5)
+        self.assertAlmostEqual((y1 + y2) / 2, eye_y * FACE_SCALE, delta=0.5)
         self.face.stop_speaking()
 
     def test_eyes_blink_and_reopen(self) -> None:

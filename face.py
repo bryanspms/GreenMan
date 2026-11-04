@@ -10,10 +10,18 @@ from collections.abc import Mapping
 
 FACE_WIDTH = 130
 FACE_HEIGHT = 130
+# One inch (96 px) of extra height on top of the 130 px design size.
+FACE_SCALE = (FACE_HEIGHT + 96) / FACE_HEIGHT
 MOUTH_FRAME_MS = 33
 EYE_FRAME_MS = 40
 MOUTH_SYNC_LATENCY_SECONDS = 0.08
 EYE_HEIGHT = 7
+WAITING_EYE_COLOR = "#ffd800"
+RECORDING_EYE_COLOR = "#e02020"
+LOADING_RADIUS = 4.5
+LOADING_RADIANS_PER_TICK = 0.25
+WAITING_SWEEP = 4.5
+WAITING_SWEEP_TICKS = 12
 BLINK_LID_LEVELS = (0.55, 1.0, 1.0, 0.55)
 
 
@@ -32,12 +40,17 @@ class GreenManFace:
         self.background = background
         self.canvas = tk.Canvas(
             parent,
-            width=FACE_WIDTH,
-            height=FACE_HEIGHT,
+            width=round(FACE_WIDTH * FACE_SCALE),
+            height=round(FACE_HEIGHT * FACE_SCALE),
             highlightthickness=0,
             bg=background,
         )
         self.speaking = False
+        self.waiting = False
+        self.loading = False
+        self.animations_enabled = True
+        self.recording = False
+        self._eyes: list[int] = []
         self.mouth_level = 0.0
         self._mouth_after: str | None = None
         self._eye_after: str | None = None
@@ -45,6 +58,7 @@ class GreenManFace:
         self._brows: list[tuple[int, float, float]] = []
         self._lids: list[tuple[int, float, float]] = []
         self._draw()
+        self.canvas.scale("all", 0, 0, FACE_SCALE, FACE_SCALE)
         self._start_eye_animation()
 
     def start_speaking(
@@ -52,6 +66,8 @@ class GreenManFace:
     ) -> None:
         """Animate the mouth from an audio envelope, or flap it if none."""
         self.stop_speaking()
+        if not self.animations_enabled:
+            return
         self.speaking = True
         started_at = time.monotonic() + MOUTH_SYNC_LATENCY_SECONDS
         phase = 0
@@ -85,6 +101,42 @@ class GreenManFace:
             self._mouth_after = self.root.after(MOUTH_FRAME_MS, tick)
 
         tick()
+
+    def set_waiting(self, waiting: bool) -> None:
+        """Turn the eyes yellow and sweep them side to side while waiting."""
+        self.waiting = waiting
+        self._refresh_eye_color()
+
+    def set_recording(self, recording: bool) -> None:
+        """Turn the eyes red while the microphone is recording."""
+        self.recording = recording
+        self._refresh_eye_color()
+
+    def set_animations(self, enabled: bool) -> None:
+        """Show or hide all animation; a disabled face stays still and neutral."""
+        self.animations_enabled = enabled
+        if not enabled:
+            self.stop_speaking()
+            self._set_lids(0.0)
+            for pupil, eye_x, eye_y in self._pupils:
+                self._coords(pupil, eye_x - 2.5, eye_y - 3, eye_x + 2.5, eye_y + 3)
+        self._refresh_eye_color()
+
+    def _refresh_eye_color(self) -> None:
+        if not self.animations_enabled:
+            fill = self.colors["green_selected"]
+        elif self.recording:
+            fill = RECORDING_EYE_COLOR
+        elif self.waiting:
+            fill = WAITING_EYE_COLOR
+        else:
+            fill = self.colors["green_selected"]
+        for eye in self._eyes:
+            self.canvas.itemconfigure(eye, fill=fill)
+
+    def set_loading(self, loading: bool) -> None:
+        """Roll the pupils in a circle while a model loads."""
+        self.loading = loading
 
     def stop_speaking(self) -> None:
         if self._mouth_after is not None:
@@ -182,9 +234,11 @@ class GreenManFace:
                 smooth=True, fill=dark_green, width=3,
             )
             self._brows.append((brow, eye_x, center_y))
-            canvas.create_oval(
-                eye_x - 7, center_y - 10, eye_x + 7, center_y - 3,
-                fill=light, outline=dark_green,
+            self._eyes.append(
+                canvas.create_oval(
+                    eye_x - 7, center_y - 10, eye_x + 7, center_y - 3,
+                    fill=light, outline=dark_green,
+                )
             )
             pupil = canvas.create_oval(
                 eye_x - 2.5, center_y - 9.5, eye_x + 2.5, center_y - 3.5,
@@ -206,12 +260,20 @@ class GreenManFace:
     def _start_eye_animation(self) -> None:
         gaze = [0.0, 0.0]
         target = [0.0, 0.0]
+        angle = [0.0]
+        sweep_dir = [1]
+        sweep_ticks = [WAITING_SWEEP_TICKS]
         ticks_until_shift = 20
         ticks_until_blink = random.randint(40, 100)
         blink_frame = len(BLINK_LID_LEVELS)
 
         def tick() -> None:
             nonlocal ticks_until_shift, ticks_until_blink, blink_frame
+            if not self.animations_enabled:
+                gaze[0] = gaze[1] = target[0] = target[1] = 0.0
+                blink_frame = len(BLINK_LID_LEVELS)
+                self._eye_after = self.root.after(EYE_FRAME_MS, tick)
+                return
             ticks_until_shift -= 1
             ticks_until_blink -= 1
             if ticks_until_blink <= 0 and blink_frame >= len(BLINK_LID_LEVELS):
@@ -228,7 +290,20 @@ class GreenManFace:
             elif blink_frame == len(BLINK_LID_LEVELS):
                 self._set_lids(0.0)
                 blink_frame += 1
-            if self.speaking:
+            if self.loading:
+                angle[0] += LOADING_RADIANS_PER_TICK
+                target[0] = LOADING_RADIUS * math.cos(angle[0])
+                target[1] = LOADING_RADIUS * math.sin(angle[0])
+                ticks_until_shift = 20
+            elif self.waiting:
+                sweep_ticks[0] -= 1
+                if sweep_ticks[0] <= 0:
+                    sweep_dir[0] = -sweep_dir[0]
+                    sweep_ticks[0] = WAITING_SWEEP_TICKS
+                target[0] = sweep_dir[0] * WAITING_SWEEP
+                target[1] = 0.0
+                ticks_until_shift = 20
+            elif self.speaking:
                 target[0] = target[1] = 0.0
                 ticks_until_shift = 20
             elif ticks_until_shift <= 0:
@@ -239,10 +314,14 @@ class GreenManFace:
                 gaze[axis] += (target[axis] - gaze[axis]) * 0.35
             for pupil, eye_x, eye_y in self._pupils:
                 x, y = eye_x + gaze[0], eye_y + gaze[1]
-                self.canvas.coords(pupil, x - 2.5, y - 3, x + 2.5, y + 3)
+                self._coords(pupil, x - 2.5, y - 3, x + 2.5, y + 3)
             self._eye_after = self.root.after(EYE_FRAME_MS, tick)
 
         tick()
+
+    def _coords(self, item: int, *points: float) -> None:
+        """Move an item using unscaled design coordinates."""
+        self.canvas.coords(item, *(point * FACE_SCALE for point in points))
 
     def _set_lids(self, closed: float) -> None:
         """Draw the eyelids over the eyes; 0 is open and 1 is fully closed."""
@@ -250,7 +329,7 @@ class GreenManFace:
             if closed <= 0:
                 self.canvas.itemconfigure(lid, state=tk.HIDDEN)
                 continue
-            self.canvas.coords(
+            self._coords(
                 lid,
                 eye_x - 7, eye_top,
                 eye_x + 7, eye_top + EYE_HEIGHT * closed,
@@ -262,7 +341,7 @@ class GreenManFace:
         cx, cy = FACE_WIDTH / 2, FACE_HEIGHT * 0.52 + 25
         half_width = 13 + 9 * level
         half_height = 2 + 15 * level
-        self.canvas.coords(
+        self._coords(
             self._mouth_item,
             cx - half_width,
             cy - half_height,
@@ -274,7 +353,7 @@ class GreenManFace:
         """Raise each brow by 0-1 (left, right) and arch it as it lifts."""
         for (brow, eye_x, eye_y), lift in zip(self._brows, lifts):
             rise = 7 * lift
-            self.canvas.coords(
+            self._coords(
                 brow,
                 eye_x - 9, eye_y - 12 - rise * 0.6,
                 eye_x, eye_y - 17 - rise,

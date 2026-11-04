@@ -1,12 +1,12 @@
 Send Email:
-Launch google chrome.
-Open a new tab to the following URL:  https://outlook.live.com/mail
+Launch Google Chrome.
+Open a new tab in Google Chrome and enter the following URL:  https://outlook.live.com/mail
+Send the ENTER key.
 Send the "N" key.
-Enter: bryansp_ms@hotmail.com;shellyp_ms@hotmail.com
-Send the Enter key
-Send the Tab key
-Enter "Test from Green Man"
-Send the Tab key
+Enter Text: bryansp_ms@hotmail.com;shellyp_ms@hotmail.com;
+Send the Tab key.
+Enter "Test from Green Man".
+Send the Tab key.
 Enter text "Hello, world.  This is from Green Man!".
 Send the Ctrl+ENTER key to send email.
 *********************************************************************************

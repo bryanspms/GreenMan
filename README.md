@@ -13,10 +13,12 @@
 - Read, write, and inspect files within a chosen folder
 - Run shell commands with explicit approval
 - Optional spoken assistant responses
-- Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows
+- Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows, with status cues for loading, waiting, and recording (can be turned off)
+- Spoken "Ready" after the Ollama model loads, including at startup
+- Current-step highlighting for multi-line Desktop control requests
 - Editable, persistent system prompt
 - Support for both X11 and Wayland sessions
-- Persistent local preferences for model, mode, workspace, and voice setting
+- Persistent local preferences for model, mode, workspace, voice setting, and face animations
 
 ## Architecture
 
@@ -258,6 +260,22 @@ downloading a Vosk model and placing its extracted folder at that path.
    and future chats, and stores it in local preferences.
 6. Send your request.
 
+The **Ollama model** and **Local API URL** fields are at the top right, beside the
+face. Green Man loads the selected model when it starts and whenever you change
+it, shows "Loading ..." in the status line, and says "Ready" when it is loaded
+(only if **Read responses aloud** is on). Controls are disabled while a model
+loads.
+
+In **Desktop control** mode, a request with several lines is treated as a list of
+steps. The line for the step currently being performed is highlighted in the
+transcript, and the highlight clears when the task finishes. Which line is
+highlighted is a best guess based on the tool the model runs (for example, a
+`press_key` call for Enter matches the line "Send the Enter key"), so it can lag
+by a line but never moves backwards. Single-line requests show no highlight.
+
+The **Save as .txt** button appears in the top right of the transcript only while
+the pointer is over it.
+
 Click **View History** (beside **Edit system prompt…**) to see every request sent
 during the current session, numbered and time-stamped. The history is kept in
 memory only: it survives **New chat** but is cleared when Green Man closes.
@@ -271,16 +289,53 @@ Speech Dispatcher.
 
 ### Animated face
 
-The Green Man face at the top left is drawn with Tkinter and is always animated:
-he blinks now and then, and his eyes glance around while idle. While a response is spoken aloud, his eyes
-settle on the user, his mouth opens and closes, and his eyebrows lift for
-emphasis.
+The Green Man face at the top left is drawn with Tkinter. By default he blinks now
+and then, and his eyes glance around while idle. While a response is spoken
+aloud, his eyes settle on the user, his mouth opens and closes, and his eyebrows
+lift for emphasis.
+
+His eyes also show what the app is doing:
+
+| State | Eyes |
+| --- | --- |
+| Model loading | Pupils move in a circle |
+| Waiting for a response | Eyes turn yellow and look fully left and right |
+| Microphone recording | Eyes turn red |
+
+Untick **Green Man Animations** (beside **Read responses aloud**) to keep the face
+still and neutral: no blinking, glancing, lip movement, or colored eyes. The
+choice is saved in local preferences; it is on by default.
 
 With a Piper voice, the mouth follows the loudness of the generated audio, so it
 matches the actual speech. With the **System voice** engines (`espeak-ng`,
 `espeak`, `spd-say`) the audio is not available to analyze, so the mouth moves at
 a steady rhythm instead. If the mouth seems ahead of or behind the voice, adjust
 `MOUTH_SYNC_LATENCY_SECONDS` in `face.py`.
+
+### Performance
+
+Each Desktop control step is one model call with a fresh screenshot, so speed
+depends on the model running on a GPU. Check with `ollama ps`: the PROCESSOR
+column should show GPU, not `100% CPU`. Image requests use a 16,384-token context
+and tool-call replies are capped at 1,024 tokens to keep memory use and runaway
+replies down.
+
+On older NVIDIA cards (for example Pascal, such as a GTX 1070), a recent Ollama
+may pick its CUDA 13 backend, which does not support them, and silently fall back
+to CPU. Forcing the CUDA 12 backend with `OLLAMA_LLM_LIBRARY=cuda_v12` fixed this
+in testing. For the snap install, set it with a systemd drop-in, because the snap
+does not expose that option:
+
+```bash
+sudo systemctl edit snap.ollama.listener.service
+# add:
+# [Service]
+# Environment=OLLAMA_LLM_LIBRARY=cuda_v12
+sudo systemctl restart snap.ollama.listener.service
+```
+
+A snap update may replace the service file, so repeat this if the GPU stops being
+used. Smaller models such as `qwen3-vl:4b-instruct` fit fully on an 8 GB GPU.
 
 ## Project Layout
 

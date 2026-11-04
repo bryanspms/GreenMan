@@ -38,7 +38,9 @@ from app import (
     is_text_tool_call,
     load_dropped_image,
     load_ollama_model,
+    current_step_index,
     local_ollama_url,
+    split_request_steps,
     load_user_preferences,
     list_piper_voice_models,
     ollama_model_capabilities,
@@ -636,7 +638,7 @@ class AppVersionTests(unittest.TestCase):
 
 class ToolCallResponseTests(unittest.TestCase):
     def test_desktop_context_budget_accounts_for_screenshot_request(self) -> None:
-        self.assertEqual(IMAGE_CONTEXT_TOKENS, 32768)
+        self.assertEqual(IMAGE_CONTEXT_TOKENS, 16384)
 
     def test_approval_releases_dialog_before_waking_action_thread(self) -> None:
         calls = []
@@ -752,7 +754,7 @@ class ToolCallResponseTests(unittest.TestCase):
         self.assertEqual(DEFAULT_MODEL, "llama3.1:8b")
 
     def test_image_tool_response_budget_allows_longer_tool_calls(self) -> None:
-        self.assertEqual(IMAGE_TOOL_CALL_RESPONSE_TOKENS, 8192)
+        self.assertEqual(IMAGE_TOOL_CALL_RESPONSE_TOKENS, 1024)
 
     def test_model_load_request_uses_ollama_generate_load_api(self) -> None:
         with patch("app.urlopen") as urlopen:
@@ -2451,6 +2453,11 @@ class ToolCallResponseTests(unittest.TestCase):
 
 
 class DesktopSafetyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = patch.object(DesktopAgent, "face", Mock(), create=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_window_fits_requested_content_without_exceeding_screen(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.root = Mock()
@@ -2588,6 +2595,7 @@ class DesktopSafetyTests(unittest.TestCase):
 
     def test_finish_appends_elapsed_duration_after_answer(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
+        agent.transcript = Mock()
         agent.turn_started_at = 10.0
         agent.busy = True
         agent.working_status_after = None
@@ -2700,6 +2708,7 @@ class DesktopSafetyTests(unittest.TestCase):
 
     def test_send_attaches_dropped_image_to_user_message(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
+        agent.transcript = Mock()
         agent.request_history = []
         agent._refresh_history_view = Mock()
         agent.busy = False
@@ -2945,8 +2954,10 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.screen_observed = True
         agent.transcript = Mock()
         agent._save_preferences = Mock()
+        agent.voice_enabled = Mock(get=Mock(return_value=True))
 
         agent._finish_model_load("qwen3-vl:8b", "llama3.1:8b", None)
+        agent.speech.speak_async.assert_called_once_with("Ready")
 
         self.assertEqual(agent.active_model, "qwen3-vl:8b")
         self.assertEqual(agent.messages[0]["role"], "system")
@@ -3330,3 +3341,40 @@ class DesktopSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StepTrackingTests(unittest.TestCase):
+    NOTES = (
+        "Launch google chrome.\n"
+        "Send the Enter key\n"
+        "\n"
+        'Enter text "Hello, world."\n'
+        "Send the Ctrl+ENTER key to send email."
+    )
+
+    def test_split_request_steps_skips_blank_lines(self) -> None:
+        spans = split_request_steps(self.NOTES)
+        self.assertEqual(
+            [self.NOTES[start:end] for start, end in spans],
+            [
+                "Launch google chrome.",
+                "Send the Enter key",
+                'Enter text "Hello, world."',
+                "Send the Ctrl+ENTER key to send email.",
+            ],
+        )
+
+    def test_tool_calls_advance_the_current_step(self) -> None:
+        steps = [self.NOTES[s:e] for s, e in split_request_steps(self.NOTES)]
+        index = current_step_index(steps, 0, "launch_application", {"title_or_app": "chrome"})
+        self.assertEqual(index, 0)
+        index = current_step_index(steps, index, "press_key", {"keys": "Enter"})
+        self.assertEqual(index, 1)
+        index = current_step_index(steps, index, "type_text", {"text": "Hello, world."})
+        self.assertEqual(index, 2)
+        index = current_step_index(steps, index, "press_key", {"keys": "ctrl+enter"})
+        self.assertEqual(index, 3)
+
+    def test_step_never_moves_backwards(self) -> None:
+        steps = ["Launch chrome", "Press Enter"]
+        self.assertEqual(current_step_index(steps, 1, "launch_application", {"title_or_app": "chrome"}), 1)

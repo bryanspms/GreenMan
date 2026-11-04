@@ -16,7 +16,7 @@ import tkinter as tk
 import time
 from threading import Event, Lock
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -346,10 +346,10 @@ DESKTOP_ACTIONS = {
 DESKTOP_COORDINATE_ACTIONS = {"click", "focus_window", "close_window"}
 MAX_FILE_BYTES = 1_000_000
 MAX_IMAGE_BYTES = 10_000_000
-IMAGE_CONTEXT_TOKENS = 32768
+IMAGE_CONTEXT_TOKENS = 16384
 IMAGE_RESPONSE_TOKENS = 4096
 TOOL_CALL_RESPONSE_TOKENS = 2048
-IMAGE_TOOL_CALL_RESPONSE_TOKENS = 8192
+IMAGE_TOOL_CALL_RESPONSE_TOKENS = 1024
 MAX_SCREENSHOT_DIMENSION = 1024
 OLLAMA_REQUEST_TIMEOUT_SECONDS = 180
 OLLAMA_IMAGE_TOOL_TIMEOUT_SECONDS = 360
@@ -772,6 +772,15 @@ def load_user_preferences(
     )
 
 
+def load_animations_preference(path: Path) -> bool:
+    try:
+        preferences = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    value = preferences.get("animations_enabled", True) if isinstance(preferences, dict) else True
+    return value if isinstance(value, bool) else True
+
+
 def save_user_preferences(
     path: Path,
     workspace: Path | None,
@@ -780,6 +789,7 @@ def save_user_preferences(
     voice_enabled: bool = False,
     voice_model: Path | None = None,
     system_prompt: str = SYSTEM_PROMPT,
+    animations_enabled: bool = True,
 ) -> str | None:
     if mode not in TOOL_MODES:
         raise ValueError(f"Unknown assistant mode: {mode}")
@@ -800,6 +810,7 @@ def save_user_preferences(
         "voice_enabled": voice_enabled,
         "voice_model": str(voice_model) if voice_model is not None else None,
         "system_prompt": system_prompt,
+        "animations_enabled": animations_enabled,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -869,6 +880,72 @@ def missing_desktop_steps(request: str, completed_tools: set[str]) -> list[str]:
     if re.search(r"\bwait\b", text) and "wait" not in completed_tools:
         missing.append("wait as requested (wait)")
     return missing
+
+
+STEP_ACTION_TOOLS = frozenset(
+    {
+        "launch_application",
+        "activate_window",
+        "focus_window",
+        "click",
+        "type_text",
+        "press_key",
+        "wait",
+        "close_window",
+        "close_named_window",
+    }
+)
+
+
+def split_request_steps(request: str) -> list[tuple[int, int]]:
+    """Character spans of each non-empty line of a multi-line request."""
+    spans = []
+    offset = 0
+    for line in request.split("\n"):
+        stripped = line.strip()
+        if stripped:
+            start = offset + line.index(stripped)
+            spans.append((start, start + len(stripped)))
+        offset += len(line) + 1
+    return spans
+
+
+def current_step_index(
+    steps: list[str], start: int, tool: str, arguments: dict
+) -> int:
+    """Index of the step this tool call most likely performs, never before `start`."""
+    if tool == "press_key":
+        evidence = str(arguments.get("keys", ""))
+    elif tool == "type_text":
+        evidence = str(arguments.get("text", ""))
+    elif tool in {"launch_application", "close_named_window"}:
+        evidence = str(arguments.get("title_or_app") or arguments.get("name") or "")
+    else:
+        evidence = ""
+    words = {
+        word
+        for word in re.findall(r"[a-z0-9@.]+", evidence.casefold())
+        if len(word) > 1 or word.isdigit()
+    }
+    if tool in {"launch_application", "activate_window", "focus_window"}:
+        keyword = "launch|open|focus|switch|activate|start"
+    elif tool == "wait":
+        keyword = "wait"
+    elif tool in {"close_window", "close_named_window"}:
+        keyword = "close"
+    elif tool == "click":
+        keyword = "click"
+    else:
+        keyword = ""
+    best_index, best_score = start, 0
+    for index in range(start, len(steps)):
+        step = steps[index].casefold()
+        score = sum(1 for word in words if word in step)
+        if keyword and re.search(rf"\b(?:{keyword})", step):
+            score += 1
+        if score > best_score:
+            best_index, best_score = index, score
+    return best_index
 
 
 def has_followup_action(request: str) -> bool:
@@ -1235,6 +1312,9 @@ class DesktopAgent:
         self.remember_desktop_approvals = False
         self.tool_mode = tk.StringVar(value=initial_mode)
         self.voice_enabled = tk.BooleanVar(value=initial_voice_enabled)
+        self.animations_enabled = tk.BooleanVar(
+            value=load_animations_preference(self.preferences_file)
+        )
         self.voice_choice = tk.StringVar(
             value=(
                 self.voice_model_path.name
@@ -1253,7 +1333,7 @@ class DesktopAgent:
         ]
 
         self._build_ui()
-        self._check_model_capabilities()
+        self.root.after(200, self._begin_model_load, self.active_model)
 
     def _configure_theme(self) -> None:
         colors = THEME_COLORS
@@ -1302,6 +1382,16 @@ class DesktopAgent:
             thickness=18,
         )
 
+    def _show_save_button(self, _event: tk.Event | None = None) -> None:
+        self.save_transcript_button.place(relx=1.0, x=-24, y=6, anchor=tk.NE)
+        self.save_transcript_button.lift()
+
+    def _hide_save_button(self, _event: tk.Event | None = None) -> None:
+        pointer = self.root.winfo_containing(*self.root.winfo_pointerxy())
+        if pointer in (self.transcript, self.save_transcript_button):
+            return
+        self.save_transcript_button.place_forget()
+
     def _build_ui(self) -> None:
         brand_row = tk.Frame(self.root, padx=10)
         brand_row.pack(fill=tk.X, pady=(6, 0))
@@ -1309,16 +1399,18 @@ class DesktopAgent:
             self.root, brand_row, THEME_COLORS, brand_row.cget("bg")
         )
         self.face.canvas.pack(side=tk.LEFT)
+        self.face.set_animations(self.animations_enabled.get())
         tk.Label(
             brand_row,
             text="Local Green Man Assistant",
             font=("TkDefaultFont", 11, "bold"),
             fg=THEME_COLORS["green"],
-        ).pack(side=tk.LEFT, padx=(8, 0))
+        ).pack(side=tk.LEFT, anchor=tk.N, padx=(8, 0))
 
-        settings = tk.Frame(self.root, padx=10, pady=8)
-        settings.pack(fill=tk.X)
-        tk.Label(settings, text="Ollama model").pack(side=tk.LEFT)
+        settings = tk.Frame(brand_row)
+        settings.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(12, 0))
+        settings.columnconfigure(1, weight=1)
+        tk.Label(settings, text="Ollama model").grid(row=0, column=0, sticky=tk.W)
         self.model_choice = tk.StringVar(value=self.active_model)
         self.model_selector = ttk.Combobox(
             settings,
@@ -1327,9 +1419,9 @@ class DesktopAgent:
             state="readonly",
             width=18,
         )
-        self.model_selector.pack(side=tk.LEFT, padx=(6, 12))
+        self.model_selector.grid(row=0, column=1, sticky=tk.EW, padx=6, pady=1)
         self.model_selector.bind("<<ComboboxSelected>>", self._on_model_selected)
-        tk.Label(settings, text="Local API URL").pack(side=tk.LEFT)
+        tk.Label(settings, text="Local API URL").grid(row=1, column=0, sticky=tk.W)
         self.url_entry = tk.Entry(
             settings,
             bg=THEME_COLORS["input"],
@@ -1339,7 +1431,7 @@ class DesktopAgent:
             highlightthickness=1,
         )
         self.url_entry.insert(0, "http://127.0.0.1:11434")
-        self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        self.url_entry.grid(row=1, column=1, sticky=tk.EW, padx=6, pady=1)
         self.url_entry.bind("<FocusOut>", self._on_ollama_url_changed)
 
         #folder_row = tk.Frame(self.root, padx=10, pady=(0, 8))
@@ -1389,6 +1481,17 @@ class DesktopAgent:
             selectcolor=THEME_COLORS["green_selected"],
         )
         self.voice_checkbox.pack(side=tk.LEFT)
+        self.animations_checkbox = tk.Checkbutton(
+            voice_toggle_row,
+            text="Green Man Animations",
+            variable=self.animations_enabled,
+            command=self._on_animations_toggled,
+            anchor=tk.W,
+            activebackground=THEME_COLORS["surface"],
+            activeforeground=THEME_COLORS["text"],
+            selectcolor=THEME_COLORS["green_selected"],
+        )
+        self.animations_checkbox.pack(side=tk.LEFT, padx=(12, 0))
         self.edit_system_prompt_button = tk.Button(
             voice_toggle_row,
             text="Edit system prompt…",
@@ -1452,6 +1555,7 @@ class DesktopAgent:
         self.transcript = scrolledtext.ScrolledText(
             self.root,
             wrap=tk.WORD,
+            height=max(8, 24 - round(96 / tkfont.nametofont("TkFixedFont").metrics("linespace"))),
             state=tk.DISABLED,
             bg=THEME_COLORS["input"],
             fg=THEME_COLORS["text"],
@@ -1462,6 +1566,14 @@ class DesktopAgent:
             highlightthickness=1,
         )
         self.transcript.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        self.transcript.tag_configure(
+            "current_step",
+            background=THEME_COLORS["green"],
+            foreground=THEME_COLORS["input"],
+        )
+        self.step_spans: list[tuple[str, str]] = []
+        self.step_texts: list[str] = []
+        self.step_index = 0
         self.save_transcript_button = tk.Button(
             self.transcript,
             text="Save as .txt",
@@ -1475,8 +1587,11 @@ class DesktopAgent:
             disabledforeground=THEME_COLORS["muted_text"],
         )
         # Placed on the ScrolledText frame so it floats above the text, left of the scrollbar.
-        self.save_transcript_button.place(relx=1.0, x=-24, y=6, anchor=tk.NE)
-        self.save_transcript_button.lift()
+        # Tk widgets cannot be translucent, so the button is only shown while the
+        # pointer is over the transcript and hidden otherwise.
+        self.transcript.bind("<Enter>", self._show_save_button, add="+")
+        self.transcript.bind("<Leave>", self._hide_save_button, add="+")
+        self.save_transcript_button.bind("<Leave>", self._hide_save_button, add="+")
 
         prompt_row = tk.Frame(self.root, padx=10, pady=8)
         prompt_row.pack(fill=tk.X)
@@ -1684,6 +1799,7 @@ class DesktopAgent:
             self.voice_enabled.get(),
             self.voice_model_path,
             self.system_prompt,
+            self.animations_enabled.get(),
         )
         if error:
             self.status.set(error)
@@ -1800,6 +1916,7 @@ class DesktopAgent:
                 self.voice_enabled.get(),
                 self.voice_model_path,
                 system_prompt,
+                self.animations_enabled.get(),
             )
             if error:
                 self.status.set(error)
@@ -1949,6 +2066,7 @@ class DesktopAgent:
         stop_event = Event()
         self.listening_event = stop_event
         self.is_listening = True
+        self.face.set_recording(True)
         self._draw_microphone_icon()
         self.status.set("Listening… Click the microphone again to stop.")
         threading.Thread(
@@ -2060,6 +2178,7 @@ class DesktopAgent:
         if stop_event is None or stop_event.is_set():
             return
         self.is_listening = False
+        self.face.set_recording(False)
         self._draw_microphone_icon()
         self.microphone_button.config(state=tk.DISABLED, cursor="")
         self.status.set("Finishing dictation…")
@@ -2072,6 +2191,7 @@ class DesktopAgent:
             return
         self.listening_event = None
         self.is_listening = False
+        self.face.set_recording(False)
         self._draw_microphone_icon()
         self.microphone_button.config(state=tk.NORMAL, cursor="hand2")
         if error:
@@ -2190,6 +2310,13 @@ class DesktopAgent:
         model = self.model_choice.get()
         if model == self.active_model:
             return
+        self._begin_model_load(model)
+
+    def _on_animations_toggled(self) -> None:
+        self.face.set_animations(self.animations_enabled.get())
+        self._save_preferences()
+
+    def _begin_model_load(self, model: str) -> None:
         self.busy = True
         self.capability_check_id += 1
         self.capability_check_pending = False
@@ -2200,6 +2327,7 @@ class DesktopAgent:
         self.save_transcript_button.config(state=tk.DISABLED)
         self._update_send_button()
         self.status.set(f"Loading {model}…")
+        self.face.set_loading(True)
         configured_url = self.url_entry.get().strip()
         threading.Thread(
             target=self._load_selected_model,
@@ -2241,6 +2369,7 @@ class DesktopAgent:
         capability_error: str | None = None,
     ) -> None:
         self.busy = False
+        self.face.set_loading(False)
         self.capability_check_pending = False
         self.model_selector.config(state="readonly")
         self.url_entry.config(state=tk.NORMAL)
@@ -2268,6 +2397,8 @@ class DesktopAgent:
                 )
         self._update_mode_buttons()
         self._update_send_button()
+        if not error and self.voice_enabled.get():
+            self.speech.speak_async("Ready")
 
     def _on_ollama_url_changed(self, _event: tk.Event | None = None) -> None:
         if not self.busy:
@@ -2373,6 +2504,46 @@ class DesktopAgent:
         self.transcript.config(state=tk.DISABLED)
         self.status.set("New chat. Connects only to a local Ollama server.")
 
+    def _begin_step_tracking(self, message_start: str, prompt: str) -> None:
+        self.transcript.tag_remove("current_step", "1.0", tk.END)
+        self.step_spans = []
+        self.step_texts = []
+        self.step_index = 0
+        if self.tool_mode.get() != "Desktop control":
+            return
+        spans = split_request_steps(prompt)
+        if len(spans) < 2:
+            return
+        prefix = len("You: ")
+        for start, end in spans:
+            self.step_spans.append(
+                (
+                    self.transcript.index(f"{message_start}+{prefix + start}c"),
+                    self.transcript.index(f"{message_start}+{prefix + end}c"),
+                )
+            )
+            self.step_texts.append(prompt[start:end])
+        self._highlight_step(0)
+
+    def _highlight_step(self, index: int) -> None:
+        spans = getattr(self, "step_spans", [])
+        self.transcript.tag_remove("current_step", "1.0", tk.END)
+        if 0 <= index < len(spans):
+            start, end = spans[index]
+            self.transcript.tag_add("current_step", start, end)
+
+    def _track_step(self, tool: str, arguments: dict) -> None:
+        if tool not in STEP_ACTION_TOOLS or not getattr(self, "step_spans", None):
+            return
+        self.step_index = current_step_index(
+            self.step_texts, self.step_index, tool, arguments
+        )
+        self.root.after(0, self._highlight_step, self.step_index)
+
+    def _clear_step_highlight(self) -> None:
+        self.step_spans = []
+        self.transcript.tag_remove("current_step", "1.0", tk.END)
+
     def _append(self, speaker: str, text: str) -> None:
         self.transcript.config(state=tk.NORMAL)
         self.transcript.insert(tk.END, f"{speaker}: {text}\n\n")
@@ -2441,7 +2612,9 @@ class DesktopAgent:
             message["images"] = [image_data]
             display_prompt += f" [Image attached: {image_name}]"
         self.prompt.delete("1.0", tk.END)
+        message_start = self.transcript.index("end-1c")
         self._append("You", display_prompt)
+        self._begin_step_tracking(message_start, prompt)
         self._record_request(display_prompt)
         self.messages.append(message)
         self._clear_pending_image()
@@ -2453,6 +2626,7 @@ class DesktopAgent:
         self.cancel_event = Event()
         self.turn_started_at = time.monotonic()
         self._start_progress_animation()
+        self.face.set_waiting(True)
         self.prompt.config(state=tk.DISABLED)
         microphone_button = getattr(self, "microphone_button", None)
         if microphone_button is not None:
@@ -3122,6 +3296,7 @@ class DesktopAgent:
                                 None,
                             )
                         else:
+                            self._track_step(str(name), arguments)
                             result, images = self._execute_tool(name, arguments)
                         denied = result == "Action denied by the user."
                         if not denied and not result.startswith("Action blocked:"):
@@ -4156,6 +4331,8 @@ class DesktopAgent:
         self.busy = False
         self.attachment_status.set(IMAGE_DROP_HINT)
         self._stop_progress_animation()
+        self.face.set_waiting(False)
+        self._clear_step_highlight()
         if self.working_status_after is not None:
             self.root.after_cancel(self.working_status_after)
             self.working_status_after = None
