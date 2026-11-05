@@ -2,19 +2,19 @@
 
 |                         |                                |
 |-------------------------|--------------------------------|
-|<img src="greenMan.png" alt="Green Man" width="600">|Green Man is a local Linux desktop assistant that connects to a local Ollama server and helps you interact with your desktop, files, and applications through a simple graphical interface.  It is designed for privacy-conscious, local-first workflows. The assistant runs on your machine, keeps file access inside a selected workspace, and requires explicit approval before desktop actions, file writes, or shell commands are executed. |
+|<img src="greenMan.png" alt="Green Man" width="600">|Green Man is a local Linux desktop assistant that connects to a local Ollama server and helps you interact with your desktop, files, and applications through a simple graphical interface. It is designed for privacy-conscious, local-first workflows. Built-in file tools are scoped to a selected workspace. Desktop input and window actions, file writes, and shell commands require approval; desktop approvals can optionally be remembered until the app closes. |
 
 ## Features
 
 - Local chat with Ollama
 - Screenshot capture for desktop inspection
 - User-approved desktop control for clicks and typing
-- Workspace-scoped file and image access
+- Workspace-scoped file tools, plus user-selected image attachments
 - Read, write, and inspect files within a chosen folder
 - Run shell commands with explicit approval
 - Optional spoken assistant responses
 - Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows, with status cues for loading, waiting, and recording (can be turned off)
-- Spoken "Ready" after the Ollama model loads, including at startup
+- Optional spoken "Ready" after the Ollama model loads, including at startup
 - Current-step highlighting for multi-line Desktop control requests
 - Editable, persistent system prompt
 - Support for both X11 and Wayland sessions
@@ -73,8 +73,16 @@ flowchart LR
 - Tkinter
 - A local Ollama server
 - A Linux graphical session
-- A model that supports both vision and tool calling for image and desktop workflows
+- A model with vision for image analysis; Screenshot and Desktop control also
+  require tool-calling support
 - Microphone dictation uses Vosk and the default English speech model (setup below)
+
+On Ubuntu, install Tkinter for the Python interpreter you use to run Green Man
+if it is not already available:
+
+```bash
+sudo apt install python3-tk
+```
 
 Qwen3-VL requires Ollama 0.12.7 or newer. Check the installed version with
 `ollama --version` and update Ollama only if it is older than that; restart the
@@ -154,9 +162,9 @@ ollama pull qwen3-vl:4b-instruct
 
 ## GNOME Wayland Window Control (optional)
 
-On GNOME Wayland, apps cannot be focused through accessibility, so closing or
-activating a window by title needs a small shell extension. Install it, then log
-out and back in once:
+On GNOME Wayland, accessibility activation may be refused. The optional shell
+extension enables reliable activation and closing by window title. Install it,
+then log out and back in once:
 
 ```bash
 cp -r gnome_extension/greenman-windows@greenman.local ~/.local/share/gnome-shell/extensions/
@@ -164,8 +172,10 @@ gnome-extensions enable greenman-windows@greenman.local
 ```
 
 When the extension is running, Green Man uses it to close or activate the window
-with the approved exact title. Without it, Green Man falls back to the
-accessibility and keyboard-shortcut path.
+with the approved exact title. Without it, Green Man attempts to activate the
+window through accessibility and uses a keyboard shortcut to close it. GNOME
+Wayland may refuse accessibility activation, so title-based activation and
+closing may not work without the extension.
 
 ## Microphone Dictation
 
@@ -200,32 +210,35 @@ downloading a Vosk model and placing its extracted folder at that path.
 2. Select an assistant mode:
    - Questions only
    - Screenshot
-   - Desktop control (Note that this section is constantly being updated with new capabilities, so if something seems to not work, please use the followchart below.)
+   - Desktop control
+   - Workspace files
+   - Run command
 
-      - On Wayland, **Screenshot** requests screen-capture access only; **Desktop
-     control** also requests pointer and keyboard access.
-      - Use **list_windows** to locate windows by application and title, including
-     windows behind Green Man. 
-      - Use **activate_window** to bring one forward,
-     **close_named_window** to close it, and **list_applications** /
-     **launch_application** to open an installed desktop app. Green Man shows the
-     resolved window or app in its approval dialog before activation, closing, or
-     launch. After a launch, Green Man reports the exact title of the window that
-     opened (or tells the model to use **list_windows** if none appeared), so a
-     follow-up **activate_window** targets the new window and not another window
-     of the same app.
-     When a window name does not match exactly, Green Man falls back to a fuzzy
-     match, so small typos or missing words (for example "Gogle Chrome") still
-     find the intended window. It only does this when one window is clearly the
-     best match; otherwise it lists the closest windows so an exact title can be
-     chosen. Approval dialogs still show the window that was resolved.
-      - For controls inside a window, activate it first, then use the fresh
-     screenshot for clicks and typing. A close request is verified by checking
-     whether the title is still in the accessible window list; that does not prove
-     the entire application process has exited. Screenshots after visual clicks
-     and typing are saved to
-     `~/.cache/greenman/last-desktop-verification.jpg`; **desktop screenshots may
-     contain private information.**
+   On Wayland, **Screenshot** requests screen-capture access only; **Desktop
+   control** also requests pointer and keyboard access.
+
+   Use **list_windows** to locate windows by application and title, including
+   windows behind Green Man. Use **activate_window** to bring one forward,
+   **close_named_window** to close it, and **list_applications** /
+   **launch_application** to open an installed desktop app. Green Man shows the
+   resolved window or app in its approval dialog before activation, closing, or
+   launch. After a launch, Green Man reports the exact title of a newly opened
+   window, or asks the model to use **list_windows** if none appeared.
+
+   If a window name does not match exactly, Green Man tries a fuzzy match. It
+   selects a window only when one is clearly the best match; otherwise it lists
+   the closest windows so an exact title can be chosen. The approval dialog
+   shows the resolved window.
+
+   For controls inside a window, activate it first, then use a fresh screenshot
+   for clicks and typing. Closing a window by title uses the GNOME Shell
+   extension when it is available; otherwise Green Man attempts to activate the
+   window through accessibility and sends the standard close shortcut. A close
+   request checks whether the window remains in a window list, which does not
+   prove that the entire application process has exited. Screenshots after visual
+   clicks and typing are saved to
+   `~/.cache/greenman/last-desktop-verification.jpg`; **desktop screenshots may
+   contain private information.**
 
      ```mermaid
      flowchart TD
@@ -239,20 +252,24 @@ downloading a Vosk model and placing its extracted folder at that path.
          H --> I[Match application and window title]
          I --> J{Requested action}
          J -- Close --> K[Approve exact window title]
-         K --> L[Activate that window and send close shortcut]
-         L --> M[list_windows to verify]
+         K --> L[GNOME close request or accessibility focus and close shortcut]
+         L --> M[list_windows to check whether the window remains]
          J -- Interact --> N[Approve and activate window]
          N --> O[Capture fresh screenshot]
          O --> P[Approve visual click or typing]
          P --> Q[Inspect verification screenshot]
      ```
-   - Workspace files
-   - Run command
+
+   To ask about an image, drop one PNG, JPEG, or WebP file onto the message
+   field. The image may be outside the selected workspace; it is attached to
+   your next message and can be removed before sending.
 3. Choose the Ollama model.
-   Green Man checks its Ollama capabilities and disables **Screenshot** and
-   **Desktop control** unless the model supports both vision and tool calling.
-   The **view_image** tool in **Workspace files** is omitted for models without
-   vision.
+   Green Man checks the model capabilities reported by Ollama. It disables
+   **Screenshot** and **Desktop control** when Ollama reports that vision or
+   tool-calling support is missing. **view_image** is omitted from **Workspace
+   files** when Ollama reports that the model lacks vision. If the capability
+   check fails, Green Man reports the error instead of concluding that the
+   model lacks those capabilities.
 4. Optionally enable **Read responses aloud** and choose **System voice** or an
    installed Piper voice from the **Voice** dropdown.
 5. Use **Edit system prompt…** beside the read-aloud checkbox to customize the
@@ -314,10 +331,12 @@ a steady rhythm instead. If the mouth seems ahead of or behind the voice, adjust
 
 ### Performance
 
-Each Desktop control step is one model call with a fresh screenshot, so speed
-depends on the model running on a GPU. Check with `ollama ps`: the PROCESSOR
-column should show GPU, not `100% CPU`. Image requests use a 16,384-token context
-and tool-call replies are capped at 1,024 tokens to keep memory use and runaway
+Desktop control advances one tool call per model response. Visual actions are
+followed by a fresh screenshot; window launches and title-based closes are
+checked with window listings. Speed depends on the model running on a GPU.
+Check with `ollama ps`: the PROCESSOR column should show GPU, not `100% CPU`.
+For Qwen3-VL, image requests use a 16,384-token context, and tool-call replies
+that include an image are capped at 1,024 tokens to keep memory use and runaway
 replies down.
 
 On older NVIDIA cards (for example Pascal, such as a GTX 1070), a recent Ollama
@@ -346,35 +365,42 @@ used. Smaller models such as `qwen3-vl:4b-instruct` fit fully on an 8 GB GPU.
 | `speech.py` | `SpeechPlayer`: Piper and system speech, and lip-sync loudness analysis |
 | `desktop_applications.py` | Installed application discovery and launching |
 | `wayland_portal.py` | Wayland screenshot and input through the XDG portal |
-| `gnome_shell_windows.py` | GNOME Shell window activation |
+| `gnome_shell_windows.py` | GNOME Shell window activation and closing |
 | `window_accessibility.py` | Window listing and closing through AT-SPI |
-| `test_*.py` | Unit tests for each module |
+| `test_*.py` | Unit and integration tests |
 
-The assistant will prompt for approval before performing desktop actions, writing files, or running shell commands.
+The app prompts before desktop input, window activation/closing, app launches,
+file writes, and shell commands. You can choose to remember desktop-action
+approval until the app closes.
 
 ## Safety and Privacy
 
 Green Man includes safeguards to keep operations transparent and controlled:
 
-- File access is limited to the selected workspace
+- File tools are limited to the selected workspace. Images deliberately dropped
+  into the message field may come from elsewhere on the computer.
 - File writes require approval
-- Desktop interactions require approval
+- Desktop input, window activation/closing, and app launches require approval;
+  that approval can be remembered until the app closes
 - Shell commands require approval
-- Screenshots and prompt data are sent only to the configured local Ollama instance
-- The app only allows local Ollama URLs
+- Prompts, attached images, and desktop screenshots used in a request are sent
+  to the configured Ollama instance. Green Man accepts only plain-HTTP URLs
+  using `localhost`, `127.0.0.1`, or `::1`.
+- Desktop verification screenshots are also saved locally at
+  `~/.cache/greenman/last-desktop-verification.jpg`.
 
 This is not a sandbox. Approved commands can still affect other parts of the system if the user explicitly allows them.
 
 ## Testing
 
 ```bash
-python3 -m unittest
+.venv/bin/python -m unittest
 ```
 
 ## Versioning
 
-The main window title shows the app version, taken from the latest Git tag
-reachable from the checked-out commit. Set or bump it by tagging a release:
+The main window title shows the tag selected by `git describe` from the tags
+reachable from the checked-out commit. Set or bump the release tag with:
 
 ```bash
 git tag -a v1.0.0 -m "Version 1.0.0"
@@ -389,11 +415,7 @@ Contributions are welcome. Please open a pull request with a clear explanation o
 
 
 ## License
-Green Man is licensed under the MIT License.
-
-You are free to use, modify, distribute, and incorporate portions of the project for both commercial and non-commercial purposes, provided proper attribution is maintained and the original copyright notice is preserved.
-
-Copyright (c) 2026 Bryan Price
+Green Man is licensed under the [MIT License](LICENSE).
 
 
 ## Attribution
