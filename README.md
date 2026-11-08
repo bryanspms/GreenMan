@@ -1,10 +1,32 @@
-# Green Man
+# <span style="color: #2f6b3f;">Green Man</span>
 
 |                         |                                |
 |-------------------------|--------------------------------|
 |<img src="greenMan.png" alt="Green Man" width="600">|Green Man is a local Linux desktop assistant that connects to a local Ollama server and helps you interact with your desktop, files, and applications through a simple graphical interface. It is designed for privacy-conscious, local-first workflows. Built-in file tools are scoped to a selected workspace. Desktop input and window actions, file writes, and shell commands require approval; desktop approvals can optionally be remembered until the app closes. |
 
-## Features
+## <span style="color: #2f6b3f;">Table of Contents</span>
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Screen Shots](#screen-shots)
+- [Requirements](#requirements)
+  - [Wayland Requirements](#wayland-requirements)
+- [Quick Start](#quick-start)
+- [GNOME Wayland Window Control (optional)](#gnome-wayland-window-control-optional)
+- [Microphone Dictation](#microphone-dictation)
+- [Usage](#usage)
+  - [Animated face](#animated-face)
+  - [Performance](#performance)
+- [Project Layout](#project-layout)
+- [Safety and Privacy](#safety-and-privacy)
+- [Testing](#testing)
+- [Versioning](#versioning)
+- [Contributing](#contributing)
+- [Help Me Help You](#help-me-help-you)
+- [License](#license)
+- [Attribution](#attribution)
+
+## <span style="color: #2f6b3f;">Features</span>
 
 - Local chat with Ollama
 - Screenshot capture for desktop inspection
@@ -20,7 +42,9 @@
 - Support for both X11 and Wayland sessions
 - Persistent local preferences for model, mode, workspace, voice setting, and face animations
 
-## Architecture
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Architecture</span>
 
 ```mermaid
 flowchart LR
@@ -59,15 +83,17 @@ flowchart LR
     Status --> UI
 ```
 
+[Back to TOC](#table-of-contents)
 
-## Screen Shots
+## <span style="color: #2f6b3f;">Screen Shots</span>
 
 ![GreenMan](greenMan-AppScreenshot.png)
 
 ![GreenMan](greenMan-EditSystemPrompt.png)
 
+[Back to TOC](#table-of-contents)
 
-## Requirements
+## <span style="color: #2f6b3f;">Requirements</span>
 
 - Python 3.10 or newer
 - Tkinter
@@ -88,7 +114,7 @@ Qwen3-VL requires Ollama 0.12.7 or newer. Check the installed version with
 `ollama --version` and update Ollama only if it is older than that; restart the
 Ollama server after updating.
 
-### Wayland Requirements
+### <span style="color: #2f6b3f;">Wayland Requirements</span>
 
 On Wayland, Green Man uses the XDG Desktop Portal and PipeWire. If needed, install the required packages on Ubuntu:
 
@@ -138,7 +164,9 @@ or `ffplay`) to play the generated speech. See Piper's
 [CLI documentation](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/CLI.md)
 for additional options.
 
-## Quick Start
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Quick Start</span>
 
 ```bash
 git clone https://github.com/bryanspms/GreenMan.git
@@ -160,7 +188,9 @@ If the 8B model is too slow, pull the smaller, typically faster 4B instruct mode
 ollama pull qwen3-vl:4b-instruct
 ```
 
-## GNOME Wayland Window Control (optional)
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">GNOME Wayland Window Control (optional)</span>
 
 On GNOME Wayland, accessibility activation may be refused. The optional shell
 extension enables reliable activation and closing by window title. Install it,
@@ -177,7 +207,9 @@ window through accessibility and uses a keyboard shortcut to close it. GNOME
 Wayland may refuse accessibility activation, so title-based activation and
 closing may not work without the extension.
 
-## Microphone Dictation
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Microphone Dictation</span>
 
 The microphone button beside the message field starts live, offline English
 dictation. Click it again to stop; recognized phrases are added to the message
@@ -204,7 +236,9 @@ The app looks for the extracted model at
 `~/.local/share/vosk-model-small-en-us-0.15`. Other languages can be used by
 downloading a Vosk model and placing its extracted folder at that path.
 
-## Usage
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Usage</span>
 
 1. Choose a workspace folder.
 2. Select an assistant mode:
@@ -304,7 +338,7 @@ Spoken responses are disabled by default. The voice selection is saved with your
 local preferences. **System voice** uses `espeak-ng`, `espeak`, or `spd-say` from
 Speech Dispatcher.
 
-### Animated face
+### <span style="color: #2f6b3f;">Animated face</span>
 
 The Green Man face at the top left is drawn with Tkinter. By default he blinks now
 and then, and his eyes glance around while idle. While a response is spoken
@@ -329,7 +363,9 @@ matches the actual speech. With the **System voice** engines (`espeak-ng`,
 a steady rhythm instead. If the mouth seems ahead of or behind the voice, adjust
 `MOUTH_SYNC_LATENCY_SECONDS` in `face.py`.
 
-### Performance
+[Back to TOC](#table-of-contents)
+
+### <span style="color: #2f6b3f;">Performance</span>
 
 Desktop control advances one tool call per model response. Visual actions are
 followed by a fresh screenshot; window launches and title-based closes are
@@ -356,7 +392,9 @@ sudo systemctl restart snap.ollama.listener.service
 A snap update may replace the service file, so repeat this if the GPU stops being
 used. Smaller models such as `qwen3-vl:4b-instruct` fit fully on an 8 GB GPU.
 
-## Project Layout
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Project Layout</span>
 
 | File | Purpose |
 |------|---------|
@@ -373,7 +411,9 @@ The app prompts before desktop input, window activation/closing, app launches,
 file writes, and shell commands. You can choose to remember desktop-action
 approval until the app closes.
 
-## Safety and Privacy
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Safety and Privacy</span>
 
 Green Man includes safeguards to keep operations transparent and controlled:
 
@@ -391,13 +431,17 @@ Green Man includes safeguards to keep operations transparent and controlled:
 
 This is not a sandbox. Approved commands can still affect other parts of the system if the user explicitly allows them.
 
-## Testing
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Testing</span>
 
 ```bash
 .venv/bin/python -m unittest
 ```
 
-## Versioning
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Versioning</span>
 
 The main window title shows the tag selected by `git describe` from the tags
 reachable from the checked-out commit. Set or bump the release tag with:
@@ -409,15 +453,37 @@ git push origin v1.0.0
 
 When no tag is available, such as in a copy without Git history, the title shows `dev`.
 
-## Contributing
+[Back to TOC](#table-of-contents)
+
+## <span style="color: #2f6b3f;">Contributing</span>
 
 Contributions are welcome. Please open a pull request with a clear explanation of the change and its purpose.
 
+[Back to TOC](#table-of-contents)
 
-## License
+## <span style="color: #2f6b3f;">Help Me Help You</span>
+
+Green Man is independently built and maintained, and developing it takes time—especially testing desktop integrations and keeping it reliable across Linux setups. Your support helps me continue improving the project, fixing issues, and keeping it free and local-first. If Green Man is useful to you, a contribution is greatly appreciated.
+
+
+<a href="https://www.buymeacoffee.com/bryanspms" target="_blank">
+  <img src= "BuyMeAcoffee-qrCode.png" alt="Buy Me A Coffee" width="180">
+</a>
+&nbsp;&nbsp;
+<a href="https://www.buymeacoffee.com/bryanspms" target="_blank">
+  <img src= "BuyMeAcoffee.gif" alt="Buy Me A Coffee" width="180">
+</a>
+
+[Back to TOC](#table-of-contents)
+
+
+## <span style="color: #2f6b3f;">License</span>
 Green Man is licensed under the [MIT License](LICENSE).
 
+[Back to TOC](#table-of-contents)
 
-## Attribution
+## <span style="color: #2f6b3f;">Attribution</span>
 
 If you build upon Green Man, attribution is appreciated: "Based on GreenMan  (github.com/bryanspms/GreenMan) by Bryan Price"
+
+[Back to TOC](#table-of-contents)
