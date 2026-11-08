@@ -476,14 +476,17 @@ Green Man is independently built and maintained, and developing it takes time—
 
 [Back to TOC](#table-of-contents)
 
+## <span style="color:#2f6b3f;">License</span>
 
-## <span style="color: #2f6b3f;">License</span>
-Green Man is licensed under the [MIT License](LICENSE).
+Green Man is licensed under the [MIT License](LICENSE). Copyright (c) 2026
+Bryan Price. See the license file for the full terms.
 
 [Back to TOC](#table-of-contents)
 
-## <span style="color: #2f6b3f;">Attribution</span>
+## <span style="color:#2f6b3f;">Attribution</span>
 
-If you build upon Green Man, attribution is appreciated: "Based on GreenMan  (github.com/bryanspms/GreenMan) by Bryan Price"
+If you build upon Green Man, attribution is appreciated:
+
+> Based on GreenMan (github.com/bryanspms/GreenMan) by Bryan Price
 
 [Back to TOC](#table-of-contents)
