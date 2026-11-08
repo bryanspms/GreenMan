@@ -2,7 +2,7 @@
 
 |                         |                                |
 |-------------------------|--------------------------------|
-|<img src="greenMan.png" alt="Green Man" width="600">|Green Man is a local Linux desktop assistant that connects to a local Ollama server and helps you interact with your desktop, files, and applications through a simple graphical interface. It is designed for privacy-conscious, local-first workflows. Built-in file tools are scoped to a selected workspace. Desktop input and window actions, file writes, and shell commands require approval; desktop approvals can optionally be remembered until the app closes. |
+|<img src="assets/greenMan.png" alt="Green Man" width="600">|Green Man is a local Linux desktop assistant that connects to a local Ollama server and helps you interact with your desktop, files, and applications through a simple graphical interface. It is designed for privacy-conscious, local-first workflows. Built-in file tools are scoped to a selected workspace. Desktop input and window actions, file writes, and shell commands require approval; desktop approvals can optionally be remembered until the app closes. |
 
 ## <span style="color: #2f6b3f;">Table of Contents</span>
 
@@ -87,9 +87,9 @@ flowchart LR
 
 ## <span style="color: #2f6b3f;">Screen Shots</span>
 
-![GreenMan](greenMan-AppScreenshot.png)
+![GreenMan](assets/greenMan-AppScreenshot.png)
 
-![GreenMan](greenMan-EditSystemPrompt.png)
+![GreenMan](assets/greenMan-EditSystemPrompt.png)
 
 [Back to TOC](#table-of-contents)
 
@@ -467,11 +467,11 @@ Green Man is independently built and maintained, and developing it takes time—
 
 
 <a href="https://www.buymeacoffee.com/bryanspms" target="_blank">
-  <img src= "BuyMeAcoffee-qrCode.png" alt="Buy Me A Coffee" width="180">
+  <img src= "assets/BuyMeAcoffee-qrCode.png" alt="Buy Me A Coffee" width="180">
 </a>
 &nbsp;&nbsp;
 <a href="https://www.buymeacoffee.com/bryanspms" target="_blank">
-  <img src= "BuyMeAcoffee.gif" alt="Buy Me A Coffee" width="180">
+  <img src= "assets/BuyMeAcoffee.gif" alt="Buy Me A Coffee" width="180">
 </a>
 
 [Back to TOC](#table-of-contents)

@@ -110,9 +110,9 @@ class WorkspacePathTests(unittest.TestCase):
         icon = Mock()
 
         with patch("app.tk.PhotoImage", return_value=icon) as photo_image:
-            retained_icon = set_window_icon(root, Path("greenMan.png"))
+            retained_icon = set_window_icon(root, Path("assets/greenMan.png"))
 
-        photo_image.assert_called_once_with(file="greenMan.png")
+        photo_image.assert_called_once_with(file="assets/greenMan.png")
         root.iconphoto.assert_called_once_with(True, icon)
         self.assertIs(retained_icon, icon)
 

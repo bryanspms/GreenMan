@@ -1259,7 +1259,7 @@ class DesktopAgent:
         self.root = root
         self.root.title(get_app_title())
         self.window_icon = set_window_icon(
-            self.root, Path(__file__).with_name("greenMan.png")
+            self.root, Path(__file__).parent / "assets" / "greenMan.png"
         )
         self._configure_theme()
         self.preferences_file = preferences_path()
