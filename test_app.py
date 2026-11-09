@@ -254,9 +254,14 @@ class SpeechControlTests(unittest.TestCase):
         self.agent.face = Mock()
         self.agent.speech = Mock()
         self.agent.stop_speech_button = Mock()
+        self.agent.pause_speech_button = Mock()
+        self.agent._speech_paused = False
+        self.agent._speech_pause_pending = False
+        self.agent._model_load_control_states = []
         self.agent._speech_events = queue.SimpleQueue()
         self.agent._speech_event = None
         self.agent._speech_events_after = None
+        self.agent.system_status_after = None
         self.agent.busy = False
 
     def test_stop_interrupts_speech_and_prevents_queued_start(self) -> None:
@@ -264,6 +269,7 @@ class SpeechControlTests(unittest.TestCase):
         self.agent.speech.speak_async.return_value = event
         self.agent.speech.stop.side_effect = event.set
         self.agent._speak("hello")
+        self.agent.face.stop_speaking.reset_mock()
         self.agent.stop_speech_button.config.assert_called_with(state="normal")
         self.agent._speech_events.put(("start", event, (None, 0.04)))
         self.agent._stop_speech()
@@ -278,6 +284,7 @@ class SpeechControlTests(unittest.TestCase):
         self.agent.speech.speak_async.side_effect = [first, second]
         self.agent._speak("old")
         self.agent._speak("new")
+        self.agent.face.stop_speaking.reset_mock()
         self.agent._speech_events.put(("stop", first, None))
         self.agent._speech_events.put(("start", second, ([0.5], 0.04)))
         self.agent._poll_speech_events()
@@ -288,16 +295,60 @@ class SpeechControlTests(unittest.TestCase):
         self.agent.face.stop_speaking.assert_called_once()
         self.agent.stop_speech_button.config.assert_called_with(state="disabled")
 
+    def test_pause_resume_and_stale_events(self) -> None:
+        event = Event()
+        self.agent.speech.speak_async.return_value = event
+        self.agent.speech.set_paused.return_value = True
+        self.agent._speak("hello")
+        self.agent._speech_events.put(("start", event, (None, 0.04)))
+        self.agent._poll_speech_events()
+        self.agent.pause_speech_button.pack.assert_called_once()
+        self.agent._toggle_speech_pause()
+        self.agent.speech.set_paused.assert_called_once_with(True, event)
+        self.agent._toggle_speech_pause()
+        self.agent.speech.set_paused.assert_called_once()
+        self.agent._speech_events.put(("pause", Event(), None))
+        self.agent._speech_events.put(("pause", event, None))
+        self.agent._poll_speech_events()
+        self.agent.face.set_speech_paused.assert_called_once_with(True)
+        self.agent.pause_speech_button.config.assert_called_with(
+            text="Play", state="normal"
+        )
+        self.agent._toggle_speech_pause()
+        self.agent.speech.set_paused.assert_called_with(False, event)
+        self.agent._speech_events.put(("resume", event, None))
+        self.agent._poll_speech_events()
+        self.agent.face.set_speech_paused.assert_called_with(False)
+        self.agent.pause_speech_button.config.assert_called_with(
+            text="Pause", state="normal"
+        )
+        self.agent._speech_events.put(("stop", event, None))
+        self.agent._poll_speech_events()
+        self.agent.pause_speech_button.pack_forget.assert_called()
+
+    def test_pause_error_is_reported(self) -> None:
+        event = Event()
+        self.agent._speech_event = event
+        self.agent.speech.set_paused.side_effect = OSError("audio failure")
+        self.agent._report_voice_error = Mock()
+        self.agent._toggle_speech_pause()
+        self.agent._report_voice_error.assert_called_once_with(
+            "Could not change speech playback: audio failure", event
+        )
+        self.assertFalse(self.agent._speech_pause_pending)
+
     def test_close_stops_speech_before_destroying_window(self) -> None:
         calls = Mock()
         calls.attach_mock(self.agent.speech, "speech")
         calls.attach_mock(self.agent.root, "root")
         self.agent._speech_events_after = "timer"
+        self.agent.system_status_after = "status-timer"
         self.agent._close()
         self.assertEqual(
             calls.mock_calls,
             [
                 unittest.mock.call.speech.stop(),
+                unittest.mock.call.root.after_cancel("status-timer"),
                 unittest.mock.call.root.after_cancel("timer"),
                 unittest.mock.call.root.destroy(),
             ],
@@ -471,9 +522,22 @@ class ModelLoadingUITests(unittest.TestCase):
         ), patch("app.piper_voice_directory", return_value=Path(folder)):
             agent = DesktopAgent(root)
             agent._save_preferences = Mock()
+            for button in (
+                agent.stop_speech_button,
+                agent.edit_system_prompt_button,
+                agent.view_history_button,
+            ):
+                for option in (
+                    "background", "foreground", "activebackground",
+                    "activeforeground", "disabledforeground", "relief",
+                ):
+                    self.assertEqual(
+                        button.cget(option), agent.workspace_button.cget(option)
+                    )
             controls = [
                 agent.workspace_button, agent.voice_directory_button,
-                agent.voice_checkbox, agent.stop_speech_button, agent.animations_checkbox,
+                agent.voice_checkbox, agent.stop_speech_button, agent.pause_speech_button,
+                agent.animations_checkbox,
                 agent.edit_system_prompt_button, agent.view_history_button,
                 agent.clear_attachment_button, agent.voice_selector,
                 agent.microphone_button, agent.new_chat_button,
@@ -518,12 +582,38 @@ class ModelLoadingUITests(unittest.TestCase):
             with patch.object(agent.speech, "speak_async", return_value=event), patch.object(
                 agent.speech, "stop", side_effect=event.set
             ) as stop:
+                self.assertEqual(agent.pause_speech_button.winfo_manager(), "")
+                for option in (
+                    "background", "foreground", "activebackground",
+                    "activeforeground", "disabledforeground", "relief",
+                ):
+                    self.assertEqual(
+                        agent.pause_speech_button.cget(option),
+                        agent.workspace_button.cget(option),
+                    )
                 agent._speak("test")
                 self.assertEqual(str(agent.stop_speech_button.cget("state")), "normal")
+                agent._speech_events.put(("start", event, (None, 0.04)))
+                agent._poll_speech_events()
+                self.assertEqual(agent.pause_speech_button.winfo_manager(), "pack")
+                self.assertEqual(agent.pause_speech_button.cget("text"), "Pause")
+                with patch.object(agent.speech, "set_paused", return_value=True) as pause:
+                    agent.pause_speech_button.invoke()
+                    pause.assert_called_with(True, event)
+                    self.assertEqual(str(agent.pause_speech_button.cget("state")), "disabled")
+                    agent._speech_events.put(("pause", event, None))
+                    agent._poll_speech_events()
+                    self.assertEqual(agent.pause_speech_button.cget("text"), "Play")
+                    agent.pause_speech_button.invoke()
+                    pause.assert_called_with(False, event)
+                    agent._speech_events.put(("resume", event, None))
+                    agent._poll_speech_events()
+                    self.assertEqual(agent.pause_speech_button.cget("text"), "Pause")
                 agent.stop_speech_button.invoke()
                 stop.assert_called_once()
                 self.assertTrue(event.is_set())
                 self.assertEqual(str(agent.stop_speech_button.cget("state")), "disabled")
+                self.assertEqual(agent.pause_speech_button.winfo_manager(), "")
 
 
 class WorkspacePathTests(unittest.TestCase):
@@ -2941,6 +3031,96 @@ class DesktopSafetyTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_status_and_prompt_remain_visible_while_working_in_short_window(self) -> None:
+        try:
+            root = TkinterDnD.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+        self.addCleanup(root.destroy)
+        with TemporaryDirectory() as folder, patch(
+            "app.preferences_path", return_value=Path(folder) / "preferences.json"
+        ), patch("app.piper_voice_directory", return_value=Path(folder)), patch.object(
+            DesktopAgent, "_begin_model_load"
+        ):
+            with patch("app.read_system_status", return_value=(40, 10)), patch(
+                "app.read_cpu_counters", return_value=(800, 700)
+            ):
+                agent = DesktopAgent(root)
+            def cancel_callbacks() -> None:
+                for callback in root.tk.splitlist(root.tk.call("after", "info")):
+                    root.after_cancel(callback)
+
+            self.addCleanup(cancel_callbacks)
+            status_label = next(
+                child
+                for row in root.winfo_children()
+                for child in row.winfo_children()
+                if isinstance(child, tk.Label)
+                and str(child.cget("textvariable")) == str(agent.status)
+            )
+            metrics_label = next(
+                child
+                for row in root.winfo_children()
+                for child in row.winfo_children()
+                if isinstance(child, tk.Label)
+                and str(child.cget("textvariable")) == str(agent.system_status)
+            )
+            root.geometry("820x650")
+            self.assertIn("Elapsed Time - 00:00", agent.system_status.get())
+            self.assertIn("GPU - 10% utilization", agent.system_status.get())
+            scheduled = agent.system_status_after
+            agent.workspace = Path(folder)
+            agent.prompt.insert("1.0", "Test the status line")
+            with patch("app.threading.Thread"), patch(
+                "app.read_system_status", return_value=(55, 60)
+            ), patch("app.read_cpu_counters", return_value=(1000, 800)), patch(
+                "app.time.monotonic", return_value=100.0
+            ):
+                agent._send()
+            self.assertTrue(agent.busy)
+            with patch("app.read_system_status", return_value=(55, 60)), patch(
+                "app.read_cpu_counters", return_value=(1200, 900)
+            ), patch("app.time.monotonic", return_value=165.0):
+                agent._refresh_system_status()
+            root.update_idletasks()
+            self.assertEqual(agent.status.get(), "Working…")
+            self.assertIn("Elapsed Time - 01:05", agent.system_status.get())
+            self.assertIn("GPU - 60% utilization", agent.system_status.get())
+            for widget in (
+                status_label, metrics_label, agent.prompt, agent.working_indicator
+            ):
+                self.assertTrue(widget.winfo_ismapped())
+                self.assertGreaterEqual(widget.winfo_height(), widget.winfo_reqheight())
+                self.assertLessEqual(
+                    widget.winfo_rooty() + widget.winfo_height(),
+                    root.winfo_rooty() + root.winfo_height(),
+                )
+            self.assertGreater(agent.transcript.winfo_height(), 1)
+            self.assertGreaterEqual(
+                metrics_label.winfo_width(), metrics_label.winfo_reqwidth()
+            )
+            agent.status.set("Another status message")
+            self.assertIn("Elapsed Time - 01:05", agent.system_status.get())
+            with patch("app.read_system_status", return_value=(56, 61)), patch(
+                "app.read_cpu_counters", return_value=(1400, 1000)
+            ), patch("app.time.monotonic", return_value=170.0):
+                agent._finish("Finished.", None)
+            root.update_idletasks()
+            self.assertEqual(agent.status.get(), "Ready.")
+            self.assertIn("Elapsed Time - 00:00", agent.system_status.get())
+            self.assertIn("GPU - 61% utilization", agent.system_status.get())
+            self.assertTrue(metrics_label.winfo_ismapped())
+            self.assertEqual(agent.system_status_after, scheduled)
+            self.assertIn(scheduled, root.tk.splitlist(root.tk.call("after", "info")))
+            with patch("app.read_system_status", return_value=(57, 62)), patch(
+                "app.read_cpu_counters", return_value=(1600, 1100)
+            ), patch("app.time.monotonic", return_value=180.0):
+                root.after_cancel(scheduled)
+                agent._update_system_status()
+            self.assertIn("Elapsed Time - 00:00", agent.system_status.get())
+            self.assertIn("CPU - 50% utilization", agent.system_status.get())
+            self.assertIn("GPU - 62% utilization", agent.system_status.get())
+
     def test_window_fits_requested_content_without_exceeding_screen(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.root = Mock()
@@ -3081,7 +3261,6 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.transcript = Mock()
         agent.turn_started_at = 10.0
         agent.busy = True
-        agent.working_status_after = None
         agent.progress_after = None
         agent.root = Mock()
         agent.model_selector = Mock()
@@ -3097,6 +3276,8 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.attachment_status = Mock()
         agent.cancel_event = Event()
         agent.status = Mock()
+        agent.system_status = Mock()
+        agent.previous_cpu_counters = None
         agent._append = Mock()
         agent._update_send_button = Mock()
 
@@ -3120,6 +3301,42 @@ class DesktopSafetyTests(unittest.TestCase):
         self.assertIsNone(agent.cancel_event)
         agent.working_indicator.pack_forget.assert_called_once_with()
         agent.attachment_status.set.assert_called_once_with(IMAGE_DROP_HINT)
+
+    def test_finish_resets_timer_on_success_error_and_cancellation(self) -> None:
+        for error, cancelled in ((None, False), ("failed", False), (None, True)):
+            with self.subTest(error=error, cancelled=cancelled):
+                agent = DesktopAgent.__new__(DesktopAgent)
+                agent.root = Mock()
+                agent.face = Mock()
+                agent.status = Mock()
+                agent.system_status = Mock()
+                agent.previous_cpu_counters = (1000, 800)
+                agent.turn_started_at = 10.0
+                agent.busy = True
+                agent.cancel_event = Event()
+                if cancelled:
+                    agent.cancel_event.set()
+                agent.attachment_status = Mock()
+                agent._stop_progress_animation = Mock()
+                agent._clear_step_highlight = Mock()
+                agent._append = Mock()
+                agent.model_selector = Mock()
+                agent.url_entry = Mock()
+                agent.prompt = Mock()
+                agent.workspace_button = Mock()
+                agent.voice_directory_button = Mock()
+                agent.new_chat_button = Mock()
+                agent.save_transcript_button = Mock()
+                agent._update_send_button = Mock()
+                agent._update_mode_buttons = Mock()
+                with patch("app.read_system_status", return_value=(55, 60)), patch(
+                    "app.read_cpu_counters", return_value=(1200, 900)
+                ), patch("app.time.monotonic", return_value=15.0):
+                    agent._finish("Finished", error)
+                self.assertIn(
+                    "Elapsed Time - 00:00", agent.system_status.set.call_args.args[0]
+                )
+                agent._append.assert_any_call("Query Duration", "5.0 seconds")
 
     def test_microphone_click_starts_offline_listening(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -3223,7 +3440,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent._append = Mock()
         agent._clear_pending_image = Mock()
         agent._start_progress_animation = Mock()
-        agent._update_working_status = Mock()
+        agent._refresh_system_status = Mock()
 
         with patch("app.threading.Thread") as thread:
             agent._send()
@@ -3302,6 +3519,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.root = Mock()
         agent.root.after.return_value = "temperature-refresh"
         agent.status = Mock()
+        agent.system_status = Mock()
         agent.previous_cpu_counters = (1000, 800)
 
         with (
@@ -3309,16 +3527,17 @@ class DesktopSafetyTests(unittest.TestCase):
             patch("app.read_cpu_counters", return_value=(1200, 900)),
             patch("app.time.monotonic", return_value=165.9),
         ):
-            agent._update_working_status()
+            agent._update_system_status()
 
-        agent.status.set.assert_called_once_with(
-            "Working…  Elapsed Time - 01:05 / CPU - 55°C / "
+        agent.status.set.assert_not_called()
+        agent.system_status.set.assert_called_once_with(
+            "Elapsed Time - 01:05 / CPU - 55°C / "
             "CPU - 50% utilization / GPU - 60% utilization"
         )
         agent.root.after.assert_called_once_with(
-            2000, agent._update_working_status
+            2000, agent._update_system_status
         )
-        self.assertEqual(agent.working_status_after, "temperature-refresh")
+        self.assertEqual(agent.system_status_after, "temperature-refresh")
 
     def test_stopping_status_keeps_elapsed_timer_visible(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
@@ -3329,6 +3548,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.root = Mock()
         agent.root.after.return_value = "refresh"
         agent.status = Mock()
+        agent.system_status = Mock()
         agent.previous_cpu_counters = None
 
         with (
@@ -3336,10 +3556,11 @@ class DesktopSafetyTests(unittest.TestCase):
             patch("app.read_cpu_counters", return_value=None),
             patch("app.time.monotonic", return_value=72.0),
         ):
-            agent._update_working_status()
+            agent._update_system_status()
 
-        self.assertIn("Stopping…  Elapsed Time - 01:12", agent.status.set.call_args.args[0])
-        agent.root.after.assert_called_once_with(2000, agent._update_working_status)
+        agent.status.set.assert_not_called()
+        self.assertIn("Elapsed Time - 01:12", agent.system_status.set.call_args.args[0])
+        agent.root.after.assert_called_once_with(2000, agent._update_system_status)
 
     def test_double_enter_sends_and_prevents_second_newline(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)

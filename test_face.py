@@ -165,6 +165,28 @@ class SleepAnimationTests(unittest.TestCase):
         )
         self.tick = self.scheduler.after.call_args.args[1]
 
+    def test_speech_pause_preserves_envelope_position_and_glasses(self) -> None:
+        self.face.start_speaking([0.0, 1.0, 0.0], window_seconds=1.0)
+        mouth_tick = self.face._mouth_tick
+        self.assertIsNotNone(mouth_tick)
+        self.now.return_value = 0.5
+        self.face.set_speech_paused(True)
+        self.assertEqual(self.face.mouth_level, 0.0)
+        self.assertTrue(self.face.speaking)
+        for item in self.face.canvas.find_withtag("reading_glasses"):
+            self.assertEqual(self.face.canvas.itemcget(item, "state"), "normal")
+        self.now.return_value = 20.5
+        self.tick()
+        self.assertFalse(self.face.sleeping)
+        self.face.set_speech_paused(False)
+        self.assertEqual(self.face.mouth_level, 0.0)
+        self.now.return_value = 21.3
+        assert mouth_tick is not None
+        mouth_tick()
+        self.assertGreater(self.face.mouth_level, 0.0)
+        self.face.stop_speaking()
+        self.assertEqual(self.face.mouth_level, 0.0)
+
     def test_idle_threshold_sleep_animation_and_wake(self) -> None:
         cap = self.face.canvas.find_withtag("nightcap")
         self.assertGreater(len(cap), 2)

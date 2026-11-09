@@ -6,7 +6,7 @@ import math
 import random
 import time
 import tkinter as tk
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 FACE_WIDTH = 130
 FACE_HEIGHT = 130
@@ -146,6 +146,9 @@ class GreenManFace:
         self._eyes: list[int] = []
         self.mouth_level = 0.0
         self._mouth_after: str | None = None
+        self._mouth_tick: Callable[[], None] | None = None
+        self._mouth_pause_started: float | None = None
+        self._mouth_paused_seconds = 0.0
         self._eye_after: str | None = None
         self._nose_twitch_frame = len(NOSE_TWITCH_OFFSETS)
         self._pupils: list[tuple[int, float, float]] = []
@@ -182,7 +185,10 @@ class GreenManFace:
             nonlocal phase, ticks_until_emphasis
             phase += 1
             if envelope is not None:
-                index = int((time.monotonic() - started_at) / window_seconds)
+                index = int(
+                    (time.monotonic() - started_at - self._mouth_paused_seconds)
+                    / window_seconds
+                )
                 target = envelope[index] if 0 <= index < len(envelope) else 0.0
             else:
                 target = 0.5 + 0.5 * math.sin(phase * 0.9)
@@ -203,7 +209,24 @@ class GreenManFace:
             self._set_brows((brow_lifts[0], brow_lifts[1]))
             self._mouth_after = self.root.after(MOUTH_FRAME_MS, tick)
 
+        self._mouth_tick = tick
         tick()
+
+    def set_speech_paused(self, paused: bool) -> None:
+        """Pause the mouth animation without losing its place in the envelope."""
+        if not self.speaking or self._mouth_tick is None:
+            return
+        if paused and self._mouth_pause_started is None:
+            self._mouth_pause_started = time.monotonic()
+            if self._mouth_after is not None:
+                self.root.after_cancel(self._mouth_after)
+                self._mouth_after = None
+            self._set_mouth(0.0)
+            self._set_brows((0.0, 0.0))
+        elif not paused and self._mouth_pause_started is not None:
+            self._mouth_paused_seconds += time.monotonic() - self._mouth_pause_started
+            self._mouth_pause_started = None
+            self._mouth_tick()
 
     def set_waiting(self, waiting: bool) -> None:
         """Turn the eyes yellow and sweep them side to side while waiting."""
@@ -260,6 +283,9 @@ class GreenManFace:
             self.root.after_cancel(self._mouth_after)
             self._mouth_after = None
         self.speaking = False
+        self._mouth_tick = None
+        self._mouth_pause_started = None
+        self._mouth_paused_seconds = 0.0
         self.canvas.itemconfigure("reading_glasses", state=tk.HIDDEN)
         self._set_mouth(0.0)
         self._set_brows((0.0, 0.0))

@@ -127,7 +127,7 @@ For basic spoken responses, install `espeak-ng` or Speech Dispatcher:
 ```bash
 sudo apt install espeak-ng
 # Alternatively:
-sudo apt install speech-dispatcher
+sudo apt install speech-dispatcher python3-speechd
 ```
 
 For more natural, local neural speech, install Piper into Green Man's virtual
@@ -320,6 +320,10 @@ it, shows "Loading ..." in the status line, and says "Ready" when it is loaded
 (only if **Read responses aloud** is on). Controls are disabled while a model
 loads.
 
+The bottom of the window shows CPU temperature and utilization and GPU
+utilization when available, updating continuously. Elapsed time counts
+during a request and resets to 00:00 when the request finishes.
+
 In **Desktop control** mode, a request with several lines is treated as a list of
 steps. The line for the step currently being performed is highlighted in the
 transcript, and the highlight clears when the task finishes. Which line is
@@ -338,11 +342,15 @@ To dictate, click the microphone icon to start listening, speak, then click it
 again to stop. Review or edit the recognized text before sending.
 
 Spoken responses are disabled by default. The voice selection is saved with your
-local preferences. **System voice** uses `espeak-ng`, `espeak`, or `spd-say` from
-Speech Dispatcher. Click **Stop speaking** to interrupt the current response
+local preferences. Common Markdown formatting marks and emoji are omitted from
+speech without changing the displayed response. **System voice** uses
+`espeak-ng`, `espeak`, or `spd-say` from Speech Dispatcher. Click **Stop speaking**
+to interrupt the current response
 without turning off spoken responses; closing Green Man also stops playback.
-With the `spd-say` fallback, Speech Dispatcher may continue audio after its
-client exits. Use Piper, `espeak-ng`, or `espeak` for reliable interruption.
+While a response is playing, use the green **Pause** button beside **Stop
+speaking** to pause, then **Play** to resume. Speech Dispatcher may finish the
+current sentence before pausing and requires the system `python3-speechd`
+package. Green Man controls only its own Speech Dispatcher connection.
 
 ### <span style="color: #2f6b3f;">Animated face</span>
 

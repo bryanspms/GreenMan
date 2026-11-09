@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -18,6 +20,32 @@ from threading import Event, Lock
 NO_SPEECH_ENGINE_MESSAGE = (
     "Install espeak-ng or speech-dispatcher to enable spoken responses."
 )
+
+_EMOJI_SEQUENCE = re.compile(
+    r"(?:[0-9#*]\ufe0f?\u20e3|[\u00a9\u00ae\u203c\u2049\u2122\u2139]\ufe0f|"
+    r"[\U0001f1e6-\U0001f1ff]{1,2}|"
+    r"[\U0001f000-\U0001faff\u2600-\u27bf]"
+    r"(?:[\ufe0e\ufe0f\U0001f3fb-\U0001f3ff]"
+    r"|[\U000e0020-\U000e007f]|\u200d"
+    r"|[\U0001f000-\U0001faff\u2600-\u27bf])*)"
+)
+
+
+def prepare_text_for_speech(text: str) -> str:
+    """Remove common Markdown decoration and emoji from spoken text."""
+    text = _EMOJI_SEQUENCE.sub(" ", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^\n)]*\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^\n)]*\)", r"\1", text)
+    text = re.sub(r"(?m)^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|>\s*)", "", text)
+    text = re.sub(r"(?m)^\s*```[^\n]*$", "", text)
+    text = re.sub(r"`+([^`\n]+)`+", r"\1", text)
+    text = re.sub(r"(\*{2,3})(?=\S)(.+?\S|\S)\1", r"\2", text)
+    text = re.sub(r"(?<!\w)(\*)(?=\S)(.+?\S|\S)\1(?!\w)", r"\2", text)
+    text = re.sub(r"(?<!\w)(_{1,3})(?=\S)(.+?\S|\S)\1(?!\w)", r"\2", text)
+    return "\n".join(
+        line for raw_line in text.splitlines()
+        if (line := re.sub(r"[^\S\n]+", " ", raw_line).strip())
+    )
 
 
 def compute_speech_envelope(
@@ -60,15 +88,22 @@ class SpeechPlayer:
         on_start: Callable[[list[float] | None, float, Event], None] | None = None,
         on_stop: Callable[[Event], None] | None = None,
         on_error: Callable[[str, Event], None] | None = None,
+        on_pause: Callable[[Event], None] | None = None,
+        on_resume: Callable[[Event], None] | None = None,
     ) -> None:
         self._voice_model_provider = voice_model_provider
         self._on_start = on_start
         self._on_stop = on_stop
         self._on_error = on_error
+        self._on_pause = on_pause
+        self._on_resume = on_resume
         self.process: subprocess.Popen | None = None
         self.process_lock = Lock()
         self._playback_lock = Lock()
         self.cancel_event: Event | None = None
+        self._pausable = False
+        self._dispatcher = False
+        self._paused = False
 
     def speak_async(self, text: str) -> Event:
         self.stop()
@@ -93,8 +128,30 @@ class SpeechPlayer:
             if process is not None and process.poll() is None:
                 try:
                     process.terminate()
+                    if self._paused and not self._dispatcher:
+                        process.send_signal(signal.SIGCONT)
                 except ProcessLookupError:
                     pass
+            self._paused = False
+
+    def set_paused(self, paused: bool, cancel_event: Event) -> bool:
+        """Request pause or resume for the current playback."""
+        with self.process_lock:
+            process = self.process
+            if (
+                self.cancel_event is not cancel_event or cancel_event.is_set()
+                or not self._pausable or process is None or process.poll() is not None
+            ):
+                return False
+            if self._dispatcher:
+                process.send_signal(signal.SIGUSR1 if paused else signal.SIGUSR2)
+            else:
+                process.send_signal(signal.SIGSTOP if paused else signal.SIGCONT)
+                self._paused = paused
+                callback = self._on_pause if paused else self._on_resume
+                if callback is not None:
+                    callback(cancel_event)
+            return True
 
     def availability_error(self) -> str | None:
         voice_model = self._voice_model_provider()
@@ -123,6 +180,9 @@ class SpeechPlayer:
         try:
             if cancel_event.is_set():
                 return
+            text = prepare_text_for_speech(text)
+            if not text:
+                return
             if self._voice_model_provider() is not None:
                 self._speak_with_piper(text, cancel_event)
                 return
@@ -130,12 +190,14 @@ class SpeechPlayer:
             if speech_engine is None:
                 raise FileNotFoundError(NO_SPEECH_ENGINE_MESSAGE)
             executable, arguments = speech_engine
-            self._notify_start(None, 0.04, cancel_event)
+            if executable.endswith("spd-say"):
+                self._speak_with_dispatcher(text, cancel_event)
+                return
             result = self._run_process(
                 [executable, *arguments],
                 cancel_event,
                 input_text=text,
-                discard_stdout=executable.endswith("spd-say"),
+                on_started=lambda: self._notify_start(None, 0.04, cancel_event),
             )
             if result and not cancel_event.is_set():
                 self._notify_error(
@@ -190,6 +252,7 @@ class SpeechPlayer:
         *,
         input_text: str | None = None,
         discard_stdout: bool = False,
+        on_started: Callable[[], None] | None = None,
     ) -> int | None:
         if cancel_event.is_set():
             return None
@@ -201,11 +264,16 @@ class SpeechPlayer:
         )
         with self.process_lock:
             self.process = process
+            self._pausable = on_started is not None
+            self._dispatcher = False
+            self._paused = False
             if cancel_event.is_set():
                 try:
                     process.terminate()
                 except ProcessLookupError:
                     pass
+            elif on_started is not None:
+                on_started()
         try:
             process.communicate(input=input_text)
             return process.returncode
@@ -213,6 +281,75 @@ class SpeechPlayer:
             with self.process_lock:
                 if self.process is process:
                     self.process = None
+                    self._pausable = False
+                    self._paused = False
+
+    def _speak_with_dispatcher(self, text: str, cancel_event: Event) -> None:
+        interpreter = (
+            Path(sys.executable)
+            if importlib.util.find_spec("speechd") is not None
+            else Path("/usr/bin/python3")
+        )
+        if not interpreter.is_file():
+            raise FileNotFoundError(
+                "Speech Dispatcher requires /usr/bin/python3 and python3-speechd."
+            )
+        if cancel_event.is_set():
+            return
+        process = subprocess.Popen(
+            [str(interpreter), str(Path(__file__).with_name("speech_dispatcher_helper.py"))],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        with self.process_lock:
+            self.process = process
+            self._pausable = False
+            self._dispatcher = True
+            self._paused = False
+            if cancel_event.is_set():
+                process.terminate()
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            try:
+                process.stdin.write(text)
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+            reported_error = False
+            for line in process.stdout:
+                message = line.rstrip("\n")
+                if message == "begin":
+                    with self.process_lock:
+                        if not cancel_event.is_set():
+                            self._pausable = True
+                            self._notify_start(None, 0.04, cancel_event)
+                elif message in ("pause", "resume"):
+                    with self.process_lock:
+                        self._paused = message == "pause"
+                        callback = self._on_pause if self._paused else self._on_resume
+                        if callback is not None and not cancel_event.is_set():
+                            callback(cancel_event)
+                elif message.startswith("error:") and not cancel_event.is_set():
+                    reported_error = True
+                    self._notify_error(message[6:], cancel_event)
+            result = process.wait()
+            if result and not reported_error and not cancel_event.is_set():
+                self._notify_error(
+                    f"Speech Dispatcher exited with status {result}.", cancel_event
+                )
+        finally:
+            if process.stdin is not None and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+            if process.stdout is not None:
+                process.stdout.close()
+            with self.process_lock:
+                if self.process is process:
+                    self.process = None
+                    self._pausable = False
+                    self._dispatcher = False
+                    self._paused = False
 
     def _speak_with_piper(self, text: str, cancel_event: Event) -> None:
         voice_model = self._voice_model_provider()
@@ -252,11 +389,13 @@ class SpeechPlayer:
                 )
             except (OSError, ValueError, EOFError, wave.Error):
                 envelope, window_seconds = None, 0.04
-            self._notify_start(envelope, window_seconds, cancel_event)
             result = self._run_process(
                 [player_executable, *player_arguments, temporary_path],
                 cancel_event,
                 discard_stdout=True,
+                on_started=lambda: self._notify_start(
+                    envelope, window_seconds, cancel_event
+                ),
             )
             if result and not cancel_event.is_set():
                 raise RuntimeError(f"Audio player exited with status {result}.")

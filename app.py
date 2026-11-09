@@ -1315,6 +1315,8 @@ class DesktopAgent:
         self._speech_events: queue.SimpleQueue[tuple[str, Event, object]] = queue.SimpleQueue()
         self._speech_event: Event | None = None
         self._speech_events_after: str | None = None
+        self._speech_paused = False
+        self._speech_pause_pending = False
         self.speech = SpeechPlayer(
             lambda: self.voice_model_path,
             on_start=lambda envelope, window, event: self._speech_events.put(
@@ -1324,10 +1326,12 @@ class DesktopAgent:
             on_error=lambda message, event: self._speech_events.put(
                 ("error", event, message)
             ),
+            on_pause=lambda event: self._speech_events.put(("pause", event, None)),
+            on_resume=lambda event: self._speech_events.put(("resume", event, None)),
         )
         self.listening_event: Event | None = None
         self.is_listening = False
-        self.working_status_after: str | None = None
+        self.system_status_after: str | None = None
         self.turn_started_at: float | None = None
         self.previous_cpu_counters: tuple[int, int] | None = None
         self.last_prompt_enter: float | None = None
@@ -1365,6 +1369,7 @@ class DesktopAgent:
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self._update_system_status()
         self._poll_speech_events()
         for event in (
             "<Motion>", "<ButtonPress>", "<KeyPress>", "<KeyRelease>", "<MouseWheel>"
@@ -1383,16 +1388,40 @@ class DesktopAgent:
             if kind == "start" and not event.is_set():
                 assert isinstance(payload, tuple)
                 self.face.start_speaking(*payload)
+                self._speech_paused = False
+                self._speech_pause_pending = False
+                self.pause_speech_button.config(
+                    text="Pause",
+                    state=tk.DISABLED if self._model_load_control_states else tk.NORMAL,
+                )
+                self.pause_speech_button.pack(
+                    side=tk.LEFT, padx=(8, 0), after=self.stop_speech_button
+                )
+            elif kind in ("pause", "resume") and not event.is_set():
+                self._speech_paused = kind == "pause"
+                self._speech_pause_pending = False
+                self.face.set_speech_paused(self._speech_paused)
+                self.pause_speech_button.config(
+                    text="Play" if self._speech_paused else "Pause",
+                    state=tk.DISABLED if self._model_load_control_states else tk.NORMAL,
+                )
             elif kind == "stop":
                 self.face.stop_speaking()
                 self._speech_event = None
                 self.stop_speech_button.config(state=tk.DISABLED)
+                self.pause_speech_button.pack_forget()
+                self._speech_paused = False
+                self._speech_pause_pending = False
             elif kind == "error" and not event.is_set():
                 assert isinstance(payload, str)
                 self._report_voice_error(payload, event)
         self._speech_events_after = self.root.after(50, self._poll_speech_events)
 
     def _speak(self, text: str) -> None:
+        self.pause_speech_button.pack_forget()
+        self.face.stop_speaking()
+        self._speech_paused = False
+        self._speech_pause_pending = False
         self._speech_event = self.speech.speak_async(text)
         if not self.busy:
             self.stop_speech_button.config(state=tk.NORMAL)
@@ -1401,9 +1430,28 @@ class DesktopAgent:
         self.speech.stop()
         self.face.stop_speaking()
         self.stop_speech_button.config(state=tk.DISABLED)
+        self.pause_speech_button.pack_forget()
+        self._speech_paused = False
+        self._speech_pause_pending = False
+
+    def _toggle_speech_pause(self) -> None:
+        event = self._speech_event
+        if event is None or self._speech_pause_pending:
+            return
+        try:
+            requested = self.speech.set_paused(not self._speech_paused, event)
+        except OSError as error:
+            self._report_voice_error(f"Could not change speech playback: {error}", event)
+            return
+        if requested:
+            self._speech_pause_pending = True
+            self.pause_speech_button.config(state=tk.DISABLED)
 
     def _close(self) -> None:
         self.speech.stop()
+        if self.system_status_after is not None:
+            self.root.after_cancel(self.system_status_after)
+            self.system_status_after = None
         if self._speech_events_after is not None:
             self.root.after_cancel(self._speech_events_after)
             self._speech_events_after = None
@@ -1575,11 +1623,23 @@ class DesktopAgent:
             text="Stop speaking",
             command=self._stop_speech,
             state=tk.DISABLED,
-            bg=THEME_COLORS["surface"],
-            fg=THEME_COLORS["text"],
-            activebackground=THEME_COLORS["green_selected"],
+            bg=THEME_COLORS["green"],
+            fg=THEME_COLORS["input"],
+            activebackground=THEME_COLORS["green_active"],
+            activeforeground=THEME_COLORS["input"],
+            disabledforeground=THEME_COLORS["muted_text"],
         )
         self.stop_speech_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.pause_speech_button = tk.Button(
+            voice_toggle_row,
+            text="Pause",
+            command=self._toggle_speech_pause,
+            bg=THEME_COLORS["green"],
+            fg=THEME_COLORS["input"],
+            activebackground=THEME_COLORS["green_active"],
+            activeforeground=THEME_COLORS["input"],
+            disabledforeground=THEME_COLORS["muted_text"],
+        )
         self.animations_checkbox = tk.Checkbutton(
             voice_toggle_row,
             text="Green Man Animations",
@@ -1595,18 +1655,22 @@ class DesktopAgent:
             voice_toggle_row,
             text="Edit system prompt…",
             command=self._open_system_prompt_editor,
-            bg=THEME_COLORS["surface"],
-            fg=THEME_COLORS["text"],
-            activebackground=THEME_COLORS["green_selected"],
+            bg=THEME_COLORS["green"],
+            fg=THEME_COLORS["input"],
+            activebackground=THEME_COLORS["green_active"],
+            activeforeground=THEME_COLORS["input"],
+            disabledforeground=THEME_COLORS["muted_text"],
         )
         self.edit_system_prompt_button.pack(side=tk.LEFT, padx=(12, 0))
         self.view_history_button = tk.Button(
             voice_toggle_row,
             text="View History",
             command=self._open_history_viewer,
-            bg=THEME_COLORS["surface"],
-            fg=THEME_COLORS["text"],
-            activebackground=THEME_COLORS["green_selected"],
+            bg=THEME_COLORS["green"],
+            fg=THEME_COLORS["input"],
+            activebackground=THEME_COLORS["green_active"],
+            activeforeground=THEME_COLORS["input"],
+            disabledforeground=THEME_COLORS["muted_text"],
         )
         self.view_history_button.pack(side=tk.LEFT, padx=(12, 0))
         voice_model_row = tk.Frame(self.root, padx=10, pady=2)
@@ -1705,7 +1769,7 @@ class DesktopAgent:
         self.save_transcript_button.bind("<Leave>", self._hide_save_button, add="+")
 
         prompt_row = tk.Frame(self.root, padx=10, pady=8)
-        prompt_row.pack(fill=tk.X)
+        prompt_row.pack(side=tk.BOTTOM, fill=tk.X, before=brand_row)
         self.microphone_button = tk.Canvas(
             prompt_row,
             width=40,
@@ -1755,7 +1819,7 @@ class DesktopAgent:
         self.send_button.pack(side=tk.LEFT, padx=(8, 0), fill=tk.Y)
 
         attachment_row = tk.Frame(self.root, padx=10)
-        attachment_row.pack(fill=tk.X)
+        attachment_row.pack(side=tk.BOTTOM, fill=tk.X, before=prompt_row)
         self.attachment_status = tk.StringVar(
             value=IMAGE_DROP_HINT
         )
@@ -1782,11 +1846,11 @@ class DesktopAgent:
             or "Connects only to a local Ollama server."
         )
         self.status = tk.StringVar(value=initial_status)
+        self.system_status = tk.StringVar(value="")
         status_row = tk.Frame(self.root, padx=10, pady=5)
-        status_row.pack(fill=tk.X)
-        tk.Label(status_row, textvariable=self.status, anchor=tk.W).pack(
-            side=tk.LEFT, fill=tk.X, expand=True
-        )
+        status_row.pack(side=tk.BOTTOM, fill=tk.X, before=attachment_row)
+        tk.Label(status_row, textvariable=self.status, anchor=tk.W).pack(fill=tk.X)
+        tk.Label(status_row, textvariable=self.system_status, anchor=tk.W).pack(fill=tk.X)
         self.working_indicator = tk.Canvas(
             input_column,
             height=18,
@@ -2395,6 +2459,7 @@ class DesktopAgent:
             return
         self.cancel_event.set()
         self._update_send_button()
+        self.status.set("Stopping…")
         with self.active_response_lock:
             response = self.active_response
         if response is not None:
@@ -2506,6 +2571,7 @@ class DesktopAgent:
             self.voice_directory_button,
             self.voice_checkbox,
             self.stop_speech_button,
+            self.pause_speech_button,
             self.animations_checkbox,
             self.edit_system_prompt_button,
             self.view_history_button,
@@ -2590,6 +2656,14 @@ class DesktopAgent:
                 state = (
                     tk.NORMAL
                     if self._speech_event is not None and not self._speech_event.is_set()
+                    else tk.DISABLED
+                )
+            elif control is self.pause_speech_button:
+                state = (
+                    tk.NORMAL
+                    if control.winfo_manager() and self._speech_event is not None
+                    and not self._speech_event.is_set()
+                    and not self._speech_pause_pending
                     else tk.DISABLED
                 )
             control.configure(state=state)
@@ -2859,7 +2933,8 @@ class DesktopAgent:
         self.url_entry.config(state=tk.DISABLED)
         for button in self.mode_buttons:
             button.config(state=tk.DISABLED)
-        self._update_working_status()
+        self.status.set("Working…")
+        self._refresh_system_status()
         api_url = self.url_entry.get().strip()
         model = self.active_model
         mode = self.tool_mode.get()
@@ -2903,12 +2978,13 @@ class DesktopAgent:
             self.progress_after = None
         self.working_indicator.pack_forget()
 
-    def _update_working_status(self) -> None:
-        if not self.busy:
-            self.working_status_after = None
-            return
-        cancel_event = getattr(self, "cancel_event", None)
-        phase = "Stopping…" if cancel_event is not None and cancel_event.is_set() else "Working…"
+    def _update_system_status(self) -> None:
+        self._refresh_system_status()
+        self.system_status_after = self.root.after(
+            2000, self._update_system_status
+        )
+
+    def _refresh_system_status(self) -> None:
         elapsed = (
             max(0.0, time.monotonic() - self.turn_started_at)
             if self.turn_started_at is not None
@@ -2927,13 +3003,10 @@ class DesktopAgent:
             f"{cpu_utilization}%" if cpu_utilization is not None else "N/A"
         )
         gpu_text = f"{gpu_utilization}%" if gpu_utilization is not None else "N/A"
-        self.status.set(
-            f"{phase}  Elapsed Time - {format_elapsed_timer(elapsed)} / "
+        self.system_status.set(
+            f"Elapsed Time - {format_elapsed_timer(elapsed)} / "
             f"CPU - {cpu_temperature_text} / "
             f"CPU - {cpu_utilization_text} utilization / GPU - {gpu_text} utilization"
-        )
-        self.working_status_after = self.root.after(
-            2000, self._update_working_status
         )
 
     def _run_turn(
@@ -4548,14 +4621,12 @@ class DesktopAgent:
         self.cancel_event = None
         turn_started_at = self.turn_started_at
         self.turn_started_at = None
+        self._refresh_system_status()
         self.busy = False
         self.attachment_status.set(IMAGE_DROP_HINT)
         self._stop_progress_animation()
         self.face.set_waiting(False)
         self._clear_step_highlight()
-        if self.working_status_after is not None:
-            self.root.after_cancel(self.working_status_after)
-            self.working_status_after = None
         if stopped:
             self._append("Status", "Query stopped by user.")
             self.status.set("Query stopped.")

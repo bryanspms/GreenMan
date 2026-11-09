@@ -1,4 +1,6 @@
 import math
+import io
+import signal
 import struct
 import subprocess
 import sys
@@ -10,7 +12,57 @@ from tempfile import TemporaryDirectory
 from threading import Event
 from unittest.mock import Mock, patch
 
-from speech import SpeechPlayer, compute_speech_envelope
+from speech import SpeechPlayer, compute_speech_envelope, prepare_text_for_speech
+
+
+class SpeechTextTests(unittest.TestCase):
+    def test_strips_formatting_and_emoji_but_preserves_text(self) -> None:
+        cases = {
+            "**Hello**, *world*! 😊": "Hello, world!",
+            "## Heading\n- **First** item\n* Second item": "Heading\nFirst item\nSecond item",
+            "Use `example.py` and [the guide](https://example.com).": (
+                "Use example.py and the guide."
+            ),
+            "Done✅Next 👨‍👩‍👧‍👦 👍🏽 🇺🇸 1️⃣": "Done Next",
+            "©️ ™️ Hello ✈️": "Hello",
+            "Café 中文 and العربية; 2 * 3 = 6; file_name; a_b_c.": (
+                "Café 中文 and العربية; 2 * 3 = 6; file_name; a_b_c."
+            ),
+            "x*y*z and 2*3*4": "x*y*z and 2*3*4",
+            "👩🏽‍💻✨": "",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(prepare_text_for_speech(source), expected)
+
+    def test_all_engines_receive_prepared_text(self) -> None:
+        for engine in ("piper", "espeak", "dispatcher"):
+            with self.subTest(engine=engine):
+                player = SpeechPlayer(lambda: Path("voice") if engine == "piper" else None)
+                event = Event()
+                with patch.object(player, "_speak_with_piper") as piper, patch.object(
+                    player, "_speak_with_dispatcher"
+                ) as dispatcher, patch.object(
+                    player, "speech_engine",
+                    return_value=("/usr/bin/spd-say" if engine == "dispatcher"
+                                  else "/usr/bin/espeak", []),
+                ), patch.object(player, "_run_process", return_value=0) as run:
+                    player.speak("**Hello** 😊", event)
+                if engine == "piper":
+                    piper.assert_called_once_with("Hello", event)
+                elif engine == "dispatcher":
+                    dispatcher.assert_called_once_with("Hello", event)
+                else:
+                    self.assertEqual(run.call_args.kwargs["input_text"], "Hello")
+
+    def test_emoji_only_skips_engines_but_completes(self) -> None:
+        stopped = Mock()
+        player = SpeechPlayer(lambda: None, on_stop=stopped)
+        event = Event()
+        with patch.object(player, "speech_engine") as engine:
+            player.speak("😊✨", event)
+        engine.assert_not_called()
+        stopped.assert_called_once_with(event)
 
 
 class SpeechEnvelopeTests(unittest.TestCase):
@@ -61,10 +113,16 @@ class SpeechPlayerTests(unittest.TestCase):
         self.assertIsNone(player.cancel_event)
 
     def test_speech_response_supports_speech_dispatcher(self) -> None:
-        player = SpeechPlayer(lambda: None)
+        on_start, on_pause, on_resume = Mock(), Mock(), Mock()
+        player = SpeechPlayer(
+            lambda: None, on_start=on_start, on_pause=on_pause, on_resume=on_resume
+        )
         cancel_event = Event()
         player.cancel_event = cancel_event
-        process = Mock(returncode=0)
+        process = Mock()
+        process.stdin = io.StringIO()
+        process.stdout = io.StringIO("begin\npause\nresume\n")
+        process.wait.return_value = 0
 
         def find_engine(name: str) -> str | None:
             return "/usr/bin/spd-say" if name == "spd-say" else None
@@ -76,12 +134,14 @@ class SpeechPlayerTests(unittest.TestCase):
             player.speak("Hello there.", cancel_event)
 
         popen.assert_called_once_with(
-            ["/usr/bin/spd-say", "--pipe-mode", "--wait"],
+            ["/usr/bin/python3", str(Path(__file__).with_name("speech_dispatcher_helper.py"))],
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             text=True,
         )
-        process.communicate.assert_called_once_with(input="Hello there.")
+        on_start.assert_called_once_with(None, 0.04, cancel_event)
+        on_pause.assert_called_once_with(cancel_event)
+        on_resume.assert_called_once_with(cancel_event)
         self.assertIsNone(player.process)
         self.assertIsNone(player.cancel_event)
 
@@ -103,6 +163,7 @@ class SpeechPlayerTests(unittest.TestCase):
                 *,
                 input_text: str | None = None,
                 discard_stdout: bool = False,
+                on_started: object = None,
             ) -> int:
                 commands.append((command, input_text))
                 if input_text is None:
@@ -216,6 +277,68 @@ class SpeechPlayerTests(unittest.TestCase):
                 player.speak("hello", event)
             self.assertEqual(len(commands), 1)
             self.assertFalse(Path(commands[0][-1]).exists())
+
+    def test_pause_resume_and_stop_a_real_process(self) -> None:
+        player = SpeechPlayer(lambda: None)
+        event = Event()
+        player.cancel_event = event
+        started = Event()
+        worker = threading.Thread(
+            target=player._run_process,
+            args=([sys.executable, "-c", "import time; time.sleep(30)"], event),
+            kwargs={"on_started": started.set},
+        )
+        worker.start()
+        try:
+            self.assertTrue(started.wait(5))
+            self.assertTrue(player.set_paused(True, event))
+            assert player.process is not None
+            process_status = Path(f"/proc/{player.process.pid}/status")
+            for _ in range(100):
+                if "\nState:\tT" in process_status.read_text():
+                    break
+                threading.Event().wait(0.01)
+            self.assertIn("\nState:\tT", process_status.read_text())
+            self.assertTrue(player.set_paused(False, event))
+            self.assertTrue(player.set_paused(True, event))
+            player.stop()
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+        finally:
+            player.stop()
+            worker.join(5)
+
+    def test_dispatcher_pause_is_scoped_to_its_helper_process(self) -> None:
+        player = SpeechPlayer(lambda: None)
+        event = Event()
+        player.cancel_event = event
+        process = Mock()
+        process.poll.return_value = None
+        player.process = process
+        player._pausable = True
+        player._dispatcher = True
+        self.assertTrue(player.set_paused(True, event))
+        process.send_signal.assert_called_with(signal.SIGUSR1)
+        self.assertTrue(player.set_paused(False, event))
+        process.send_signal.assert_called_with(signal.SIGUSR2)
+        self.assertFalse(player.set_paused(True, Event()))
+
+    def test_dispatcher_missing_bindings_reports_actionable_error(self) -> None:
+        on_error = Mock()
+        player = SpeechPlayer(lambda: None, on_error=on_error)
+        event = Event()
+        player.cancel_event = event
+        process = Mock()
+        process.stdin = io.StringIO()
+        process.stdout = io.StringIO(
+            "error:Speech Dispatcher requires the system python3-speechd package.\n"
+        )
+        process.wait.return_value = 1
+        with patch("speech.subprocess.Popen", return_value=process):
+            player._speak_with_dispatcher("hello", event)
+        on_error.assert_called_once_with(
+            "Speech Dispatcher requires the system python3-speechd package.", event
+        )
 
 
 if __name__ == "__main__":
