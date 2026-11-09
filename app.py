@@ -22,7 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from face import GreenManFace
+from face import EyeLegend, GreenManFace
 from speech import SpeechPlayer
 from desktop_applications import DesktopApplication, DesktopApplicationLauncher
 from wayland_portal import WaylandDesktopPortal
@@ -781,6 +781,24 @@ def load_animations_preference(path: Path) -> bool:
     return value if isinstance(value, bool) else True
 
 
+def load_piper_voice_directory(path: Path) -> tuple[Path, str | None]:
+    try:
+        preferences = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return piper_voice_directory(), None
+    if not isinstance(preferences, dict):
+        return piper_voice_directory(), None
+    directory = preferences.get("piper_voice_directory")
+    if directory is None:
+        return piper_voice_directory(), None
+    if not isinstance(directory, str) or not directory.strip():
+        return piper_voice_directory(), "Saved voice model folder is invalid; using the default."
+    saved_directory = Path(directory).expanduser()
+    if not saved_directory.is_dir():
+        return saved_directory, f"Voice model folder is not available: {saved_directory}"
+    return saved_directory, None
+
+
 def save_user_preferences(
     path: Path,
     workspace: Path | None,
@@ -790,6 +808,7 @@ def save_user_preferences(
     voice_model: Path | None = None,
     system_prompt: str = SYSTEM_PROMPT,
     animations_enabled: bool = True,
+    piper_directory: Path | None = None,
 ) -> str | None:
     if mode not in TOOL_MODES:
         raise ValueError(f"Unknown assistant mode: {mode}")
@@ -799,6 +818,8 @@ def save_user_preferences(
         raise ValueError("Voice setting must be a boolean.")
     if voice_model is not None and not isinstance(voice_model, Path):
         raise ValueError("Voice model must be a filesystem path.")
+    if piper_directory is not None and not isinstance(piper_directory, Path):
+        raise ValueError("Voice model folder must be a filesystem path.")
     if not isinstance(system_prompt, str):
         raise ValueError("System prompt must be text.")
     if workspace is not None and not is_valid_workspace(workspace):
@@ -811,6 +832,7 @@ def save_user_preferences(
         "voice_model": str(voice_model) if voice_model is not None else None,
         "system_prompt": system_prompt,
         "animations_enabled": animations_enabled,
+        "piper_voice_directory": str(piper_directory) if piper_directory is not None else None,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1272,26 +1294,35 @@ class DesktopAgent:
             self.system_prompt,
             self.preferences_error,
         ) = load_user_preferences(self.preferences_file)
-        self.piper_voice_directory = piper_voice_directory()
+        self.piper_voice_directory, directory_error = load_piper_voice_directory(
+            self.preferences_file
+        )
         self.piper_voice_models, self.voice_models_error = list_piper_voice_models(
             self.piper_voice_directory
         )
+        self.voice_models_error = directory_error or self.voice_models_error
         if self.voice_model_path not in self.piper_voice_models:
             self.voice_model_path = None
         self.busy = False
+        self._model_load_control_states: list[tuple[tk.Widget, str]] = []
         self.request_history: list[tuple[str, str]] = []
         self.history_dialog: tk.Toplevel | None = None
+        self.eye_legend_dialog: tk.Toplevel | None = None
+        self.eye_legend: EyeLegend | None = None
         self.cancel_event: Event | None = None
         self.active_response = None
         self.active_response_lock = Lock()
+        self._speech_events: queue.SimpleQueue[tuple[str, Event, object]] = queue.SimpleQueue()
+        self._speech_event: Event | None = None
+        self._speech_events_after: str | None = None
         self.speech = SpeechPlayer(
             lambda: self.voice_model_path,
-            on_start=lambda envelope, window: self.root.after(
-                0, self.face.start_speaking, envelope, window
+            on_start=lambda envelope, window, event: self._speech_events.put(
+                ("start", event, (envelope, window))
             ),
-            on_stop=lambda: self.root.after(0, self.face.stop_speaking),
-            on_error=lambda message, event: self.root.after(
-                0, self._report_voice_error, message, event
+            on_stop=lambda event: self._speech_events.put(("stop", event, None)),
+            on_error=lambda message, event: self._speech_events.put(
+                ("error", event, message)
             ),
         )
         self.listening_event: Event | None = None
@@ -1333,7 +1364,50 @@ class DesktopAgent:
         ]
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self._poll_speech_events()
+        for event in (
+            "<Motion>", "<ButtonPress>", "<KeyPress>", "<KeyRelease>", "<MouseWheel>"
+        ):
+            self.root.bind_all(event, self._on_user_activity, add="+")
         self.root.after(200, self._begin_model_load, self.active_model)
+
+    def _on_user_activity(self, _event: tk.Event) -> None:
+        self.face.note_activity()
+
+    def _poll_speech_events(self) -> None:
+        while not self._speech_events.empty():
+            kind, event, payload = self._speech_events.get_nowait()
+            if event is not self._speech_event:
+                continue
+            if kind == "start" and not event.is_set():
+                assert isinstance(payload, tuple)
+                self.face.start_speaking(*payload)
+            elif kind == "stop":
+                self.face.stop_speaking()
+                self._speech_event = None
+                self.stop_speech_button.config(state=tk.DISABLED)
+            elif kind == "error" and not event.is_set():
+                assert isinstance(payload, str)
+                self._report_voice_error(payload, event)
+        self._speech_events_after = self.root.after(50, self._poll_speech_events)
+
+    def _speak(self, text: str) -> None:
+        self._speech_event = self.speech.speak_async(text)
+        if not self.busy:
+            self.stop_speech_button.config(state=tk.NORMAL)
+
+    def _stop_speech(self) -> None:
+        self.speech.stop()
+        self.face.stop_speaking()
+        self.stop_speech_button.config(state=tk.DISABLED)
+
+    def _close(self) -> None:
+        self.speech.stop()
+        if self._speech_events_after is not None:
+            self.root.after_cancel(self._speech_events_after)
+            self._speech_events_after = None
+        self.root.destroy()
 
     def _configure_theme(self) -> None:
         colors = THEME_COLORS
@@ -1400,12 +1474,27 @@ class DesktopAgent:
         )
         self.face.canvas.pack(side=tk.LEFT)
         self.face.set_animations(self.animations_enabled.get())
+        brand_title = tk.Frame(brand_row)
+        brand_title.pack(side=tk.LEFT, anchor=tk.N, padx=(8, 0))
         tk.Label(
-            brand_row,
+            brand_title,
             text="Local Green Man Assistant",
             font=("TkDefaultFont", 11, "bold"),
             fg=THEME_COLORS["green"],
-        ).pack(side=tk.LEFT, anchor=tk.N, padx=(8, 0))
+        ).pack(anchor=tk.W)
+        eye_guide_link = tk.Label(
+            brand_title,
+            text="Eye Guide",
+            font=("TkDefaultFont", 9, "underline"),
+            fg=THEME_COLORS["green"],
+            bg=brand_title.cget("bg"),
+            cursor="hand2",
+            takefocus=True,
+        )
+        eye_guide_link.pack(anchor=tk.W)
+        eye_guide_link.bind("<Button-1>", lambda _event: self._open_eye_guide())
+        eye_guide_link.bind("<Return>", lambda _event: self._open_eye_guide())
+        eye_guide_link.bind("<space>", lambda _event: self._open_eye_guide())
 
         settings = tk.Frame(brand_row)
         settings.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(12, 0))
@@ -1481,6 +1570,16 @@ class DesktopAgent:
             selectcolor=THEME_COLORS["green_selected"],
         )
         self.voice_checkbox.pack(side=tk.LEFT)
+        self.stop_speech_button = tk.Button(
+            voice_toggle_row,
+            text="Stop speaking",
+            command=self._stop_speech,
+            state=tk.DISABLED,
+            bg=THEME_COLORS["surface"],
+            fg=THEME_COLORS["text"],
+            activebackground=THEME_COLORS["green_selected"],
+        )
+        self.stop_speech_button.pack(side=tk.LEFT, padx=(8, 0))
         self.animations_checkbox = tk.Checkbutton(
             voice_toggle_row,
             text="Green Man Animations",
@@ -1528,12 +1627,24 @@ class DesktopAgent:
         self.voice_selector.bind(
             "<<ComboboxSelected>>", self._on_voice_selected
         )
-        tk.Label(
+        self.voice_directory_button = tk.Button(
             voice_model_row,
-            text=f"Models: {self.piper_voice_directory}",
+            text="Voice Model Folder",
+            command=self._choose_voice_directory,
+            bg=THEME_COLORS["green"],
+            fg=THEME_COLORS["input"],
+            activebackground=THEME_COLORS["green_active"],
+            activeforeground=THEME_COLORS["input"],
+            disabledforeground=THEME_COLORS["muted_text"],
+        )
+        self.voice_directory_button.pack(side=tk.LEFT)
+        self.voice_directory_label = tk.Label(
+            voice_model_row,
+            text=str(self.piper_voice_directory),
             anchor=tk.W,
             fg=THEME_COLORS["muted_text"],
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        )
+        self.voice_directory_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
 
         mode_row = tk.LabelFrame(self.root, text="Assistant mode", padx=6, pady=2)
         mode_row.pack(fill=tk.X, padx=10, pady=(0, 4))
@@ -1800,6 +1911,7 @@ class DesktopAgent:
             self.voice_model_path,
             self.system_prompt,
             self.animations_enabled.get(),
+            self.piper_voice_directory,
         )
         if error:
             self.status.set(error)
@@ -1917,6 +2029,7 @@ class DesktopAgent:
                 self.voice_model_path,
                 system_prompt,
                 self.animations_enabled.get(),
+                self.piper_voice_directory,
             )
             if error:
                 self.status.set(error)
@@ -1946,12 +2059,7 @@ class DesktopAgent:
         dialog.grab_set()
         prompt_editor.focus_set()
 
-    def _refresh_voice_options(self) -> None:
-        models, error = list_piper_voice_models(self.piper_voice_directory)
-        if error:
-            self.voice_models_error = error
-            self.status.set(error)
-            return
+    def _set_voice_options(self, models: list[Path]) -> bool:
         self.voice_models_error = None
         self.piper_voice_models = models
         self.voice_selector.configure(
@@ -1968,7 +2076,49 @@ class DesktopAgent:
         if self.voice_model_path is not None and selected_model is None:
             self.voice_model_path = None
             self.voice_choice.set(SYSTEM_VOICE)
+            self.speech.stop()
+            return True
+        return False
+
+    def _refresh_voice_options(self) -> None:
+        if not self.piper_voice_directory.is_dir():
+            error = f"Voice model folder is not available: {self.piper_voice_directory}"
+            self.voice_models_error = error
+            self.status.set(error)
+            return
+        models, error = list_piper_voice_models(self.piper_voice_directory)
+        if error:
+            self.voice_models_error = error
+            self.status.set(error)
+            return
+        if self._set_voice_options(models):
             self._save_preferences()
+
+    def _choose_voice_directory(self) -> None:
+        selected = filedialog.askdirectory(
+            title="Choose a Piper voice model folder",
+            initialdir=str(self.piper_voice_directory),
+            parent=self.root,
+            mustexist=True,
+        )
+        if not selected:
+            return
+        try:
+            directory = Path(selected).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            self.status.set(f"Could not open voice model folder: {error}")
+            return
+        if not directory.is_dir():
+            self.status.set(f"Voice model folder is not a directory: {directory}")
+            return
+        models, error = list_piper_voice_models(directory)
+        if error:
+            self.status.set(error)
+            return
+        self.piper_voice_directory = directory
+        self.voice_directory_label.config(text=str(directory))
+        self._set_voice_options(models)
+        self._save_preferences()
 
     def _on_voice_selected(self, _event: tk.Event | None = None) -> None:
         selected = self.voice_choice.get()
@@ -2193,7 +2343,8 @@ class DesktopAgent:
         self.is_listening = False
         self.face.set_recording(False)
         self._draw_microphone_icon()
-        self.microphone_button.config(state=tk.NORMAL, cursor="hand2")
+        if not self.busy:
+            self.microphone_button.config(state=tk.NORMAL, cursor="hand2")
         if error:
             self.status.set(error)
         elif not self.busy:
@@ -2314,10 +2465,60 @@ class DesktopAgent:
 
     def _on_animations_toggled(self) -> None:
         self.face.set_animations(self.animations_enabled.get())
+        if self.eye_legend_dialog is not None and self.eye_legend_dialog.winfo_exists():
+            if self.eye_legend is not None:
+                self.eye_legend.set_animations(self.animations_enabled.get())
         self._save_preferences()
+
+    def _open_eye_guide(self) -> None:
+        dialog = self.eye_legend_dialog
+        if dialog is not None and dialog.winfo_exists():
+            dialog.deiconify()
+            dialog.lift()
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Eye Guide")
+        dialog.configure(bg=THEME_COLORS["background"])
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        self.eye_legend_dialog = dialog
+        self.eye_legend = EyeLegend(dialog, THEME_COLORS, THEME_COLORS["background"])
+        self.eye_legend.frame.pack(padx=10, pady=10)
+        self.eye_legend.set_animations(self.animations_enabled.get())
+        tk.Button(
+            dialog,
+            text="Close",
+            command=dialog.destroy,
+            bg=THEME_COLORS["surface"],
+            fg=THEME_COLORS["text"],
+            activebackground=THEME_COLORS["green_selected"],
+        ).pack(pady=(0, 10))
+        dialog.update_idletasks()
+        dialog.geometry(f"{max(240, dialog.winfo_reqwidth())}x{dialog.winfo_reqheight()}")
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.grab_set()
+        dialog.focus_set()
 
     def _begin_model_load(self, model: str) -> None:
         self.busy = True
+        controls = (
+            self.workspace_button,
+            self.voice_directory_button,
+            self.voice_checkbox,
+            self.stop_speech_button,
+            self.animations_checkbox,
+            self.edit_system_prompt_button,
+            self.view_history_button,
+            self.clear_attachment_button,
+            self.voice_selector,
+            self.microphone_button,
+        )
+        self._model_load_control_states = [
+            (control, str(control.cget("state"))) for control in controls
+        ]
+        for control in controls:
+            control.configure(state=tk.DISABLED)
+        self.microphone_button.configure(cursor="")
         self.capability_check_id += 1
         self.capability_check_pending = False
         self._update_mode_buttons()
@@ -2375,6 +2576,24 @@ class DesktopAgent:
         self.url_entry.config(state=tk.NORMAL)
         self.new_chat_button.config(state=tk.NORMAL)
         self.save_transcript_button.config(state=tk.NORMAL)
+        for control, state in self._model_load_control_states:
+            if control is self.microphone_button:
+                state = (
+                    tk.DISABLED
+                    if self.listening_event is not None and not self.is_listening
+                    else tk.NORMAL
+                )
+                self.microphone_button.configure(
+                    cursor="" if state == tk.DISABLED else "hand2"
+                )
+            elif control is self.stop_speech_button:
+                state = (
+                    tk.NORMAL
+                    if self._speech_event is not None and not self._speech_event.is_set()
+                    else tk.DISABLED
+                )
+            control.configure(state=state)
+        self._model_load_control_states = []
         if error:
             self.model_choice.set(previous_model)
             self._append("Error", error)
@@ -2398,7 +2617,7 @@ class DesktopAgent:
         self._update_mode_buttons()
         self._update_send_button()
         if not error and self.voice_enabled.get():
-            self.speech.speak_async("Ready")
+            self._speak("Ready")
 
     def _on_ollama_url_changed(self, _event: tk.Event | None = None) -> None:
         if not self.busy:
@@ -2633,6 +2852,7 @@ class DesktopAgent:
             microphone_button.config(state=tk.DISABLED, cursor="")
         self._update_send_button()
         self.workspace_button.config(state=tk.DISABLED)
+        self.voice_directory_button.config(state=tk.DISABLED)
         self.new_chat_button.config(state=tk.DISABLED)
         self.save_transcript_button.config(state=tk.DISABLED)
         self.model_selector.config(state=tk.DISABLED)
@@ -4347,7 +4567,7 @@ class DesktopAgent:
             self.status.set("Ready.")
             voice_enabled = getattr(self, "voice_enabled", None)
             if answer and voice_enabled is not None and voice_enabled.get():
-                self.speech.speak_async(answer)
+                self._speak(answer)
         if turn_started_at is not None:
             elapsed_seconds = max(0.0, time.monotonic() - turn_started_at)
             self._append("Query Duration", format_elapsed_time(elapsed_seconds))
@@ -4358,6 +4578,7 @@ class DesktopAgent:
         if microphone_button is not None:
             microphone_button.config(state=tk.NORMAL, cursor="hand2")
         self.workspace_button.config(state=tk.NORMAL)
+        self.voice_directory_button.config(state=tk.NORMAL)
         self._update_send_button()
         self.new_chat_button.config(state=tk.NORMAL)
         self.save_transcript_button.config(state=tk.NORMAL)

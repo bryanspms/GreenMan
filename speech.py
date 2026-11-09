@@ -57,8 +57,8 @@ class SpeechPlayer:
     def __init__(
         self,
         voice_model_provider: Callable[[], Path | None],
-        on_start: Callable[[list[float] | None, float], None] | None = None,
-        on_stop: Callable[[], None] | None = None,
+        on_start: Callable[[list[float] | None, float, Event], None] | None = None,
+        on_stop: Callable[[Event], None] | None = None,
         on_error: Callable[[str, Event], None] | None = None,
     ) -> None:
         self._voice_model_provider = voice_model_provider
@@ -67,26 +67,34 @@ class SpeechPlayer:
         self._on_error = on_error
         self.process: subprocess.Popen | None = None
         self.process_lock = Lock()
+        self._playback_lock = Lock()
         self.cancel_event: Event | None = None
 
-    def speak_async(self, text: str) -> None:
+    def speak_async(self, text: str) -> Event:
+        self.stop()
         cancel_event = Event()
-        self.cancel_event = cancel_event
+        with self.process_lock:
+            self.cancel_event = cancel_event
         threading.Thread(
-            target=self.speak, args=(text, cancel_event), daemon=True
+            target=self._speak_serially, args=(text, cancel_event), daemon=True
         ).start()
+        return cancel_event
+
+    def _speak_serially(self, text: str, cancel_event: Event) -> None:
+        with self._playback_lock:
+            self.speak(text, cancel_event)
 
     def stop(self) -> None:
-        cancel_event = self.cancel_event
-        if cancel_event is not None:
-            cancel_event.set()
         with self.process_lock:
+            cancel_event = self.cancel_event
+            if cancel_event is not None:
+                cancel_event.set()
             process = self.process
-        if process is not None and process.poll() is None:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
 
     def availability_error(self) -> str | None:
         voice_model = self._voice_model_provider()
@@ -112,9 +120,9 @@ class SpeechPlayer:
         return None
 
     def speak(self, text: str, cancel_event: Event) -> None:
-        if cancel_event.is_set():
-            return
         try:
+            if cancel_event.is_set():
+                return
             if self._voice_model_provider() is not None:
                 self._speak_with_piper(text, cancel_event)
                 return
@@ -122,7 +130,7 @@ class SpeechPlayer:
             if speech_engine is None:
                 raise FileNotFoundError(NO_SPEECH_ENGINE_MESSAGE)
             executable, arguments = speech_engine
-            self._notify_start(None, 0.04)
+            self._notify_start(None, 0.04, cancel_event)
             result = self._run_process(
                 [executable, *arguments],
                 cancel_event,
@@ -138,9 +146,10 @@ class SpeechPlayer:
                 self._notify_error(str(error), cancel_event)
         finally:
             if self._on_stop is not None:
-                self._on_stop()
-            if self.cancel_event is cancel_event:
-                self.cancel_event = None
+                self._on_stop(cancel_event)
+            with self.process_lock:
+                if self.cancel_event is cancel_event:
+                    self.cancel_event = None
 
     @staticmethod
     def speech_engine() -> tuple[str, list[str]] | None:
@@ -165,10 +174,10 @@ class SpeechPlayer:
         return None
 
     def _notify_start(
-        self, envelope: list[float] | None, window_seconds: float
+        self, envelope: list[float] | None, window_seconds: float, cancel_event: Event
     ) -> None:
         if self._on_start is not None:
-            self._on_start(envelope, window_seconds)
+            self._on_start(envelope, window_seconds, cancel_event)
 
     def _notify_error(self, message: str, cancel_event: Event) -> None:
         if self._on_error is not None:
@@ -243,7 +252,7 @@ class SpeechPlayer:
                 )
             except (OSError, ValueError, EOFError, wave.Error):
                 envelope, window_seconds = None, 0.04
-            self._notify_start(envelope, window_seconds)
+            self._notify_start(envelope, window_seconds, cancel_event)
             result = self._run_process(
                 [player_executable, *player_arguments, temporary_path],
                 cancel_event,

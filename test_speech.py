@@ -2,6 +2,7 @@ import math
 import struct
 import subprocess
 import sys
+import threading
 import unittest
 import wave
 from pathlib import Path
@@ -54,8 +55,8 @@ class SpeechPlayerTests(unittest.TestCase):
             text=True,
         )
         process.communicate.assert_called_once_with(input="Hello there.")
-        on_start.assert_called_once_with(None, 0.04)
-        on_stop.assert_called_once_with()
+        on_start.assert_called_once_with(None, 0.04, cancel_event)
+        on_stop.assert_called_once_with(cancel_event)
         self.assertIsNone(player.process)
         self.assertIsNone(player.cancel_event)
 
@@ -145,6 +146,76 @@ class SpeechPlayerTests(unittest.TestCase):
         player.stop()
         self.assertTrue(player.cancel_event.is_set())
         player.process.terminate.assert_called_once_with()
+
+    def test_stop_terminates_a_real_running_process(self) -> None:
+        player = SpeechPlayer(lambda: None)
+        event = Event()
+        player.cancel_event = event
+        started = Event()
+        actual_popen = subprocess.Popen
+
+        def popen(*args: object, **kwargs: object) -> subprocess.Popen:
+            process = actual_popen(*args, **kwargs)
+            started.set()
+            return process
+
+        with patch("speech.subprocess.Popen", side_effect=popen):
+            worker = threading.Thread(
+                target=player._run_process,
+                args=([sys.executable, "-c", "import time; time.sleep(30)"], event),
+            )
+            worker.start()
+            self.assertTrue(started.wait(5))
+            player.stop()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(event.is_set())
+        self.assertIsNone(player.process)
+
+    def test_replacement_speech_cancels_and_waits_for_previous_worker(self) -> None:
+        player = SpeechPlayer(lambda: None)
+        first_started = Event()
+        release_first = Event()
+        second_started = Event()
+
+        def speak(text: str, event: Event) -> None:
+            if text == "first":
+                first_started.set()
+                release_first.wait(5)
+            else:
+                second_started.set()
+
+        with patch.object(player, "speak", side_effect=speak):
+            first = player.speak_async("first")
+            try:
+                self.assertTrue(first_started.wait(5))
+                second = player.speak_async("second")
+                self.assertTrue(first.is_set())
+                self.assertFalse(second.is_set())
+                self.assertFalse(second_started.wait(0.1))
+            finally:
+                release_first.set()
+            self.assertTrue(second_started.wait(5))
+
+    def test_cancel_during_piper_synthesis_does_not_start_playback(self) -> None:
+        with TemporaryDirectory() as folder:
+            player = SpeechPlayer(lambda: Path(folder) / "voice.onnx")
+            player.audio_player = Mock(return_value=("/usr/bin/aplay", []))
+            event = Event()
+            commands: list[list[str]] = []
+
+            def cancel_synthesis(
+                command: list[str], cancel_event: Event, **_kwargs: object
+            ) -> int:
+                commands.append(command)
+                cancel_event.set()
+                return 0
+
+            player._run_process = Mock(side_effect=cancel_synthesis)
+            with patch("speech.importlib.util.find_spec", return_value=object()):
+                player.speak("hello", event)
+            self.assertEqual(len(commands), 1)
+            self.assertFalse(Path(commands[0][-1]).exists())
 
 
 if __name__ == "__main__":

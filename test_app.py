@@ -1,15 +1,19 @@
 import json
 import base64
+import queue
 from io import BytesIO
 import socket
 import subprocess
 import sys
+import tkinter as tk
 import unittest
 from threading import Event, Lock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError, URLError
 from unittest.mock import Mock, patch
+
+from tkinterdnd2 import TkinterDnD
 
 from app import (
     DEFAULT_MODEL,
@@ -42,6 +46,7 @@ from app import (
     local_ollama_url,
     split_request_steps,
     load_user_preferences,
+    load_piper_voice_directory,
     list_piper_voice_models,
     ollama_model_capabilities,
     ollama_http_error_message,
@@ -66,7 +71,485 @@ from desktop_applications import DesktopApplication
 from window_accessibility import AccessibleWindow
 
 
+class EyeLegendIntegrationTests(unittest.TestCase):
+    def test_eye_guide_link_appears_below_title_and_opens_popup(self) -> None:
+        try:
+            root = TkinterDnD.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+        self.addCleanup(root.destroy)
+        with TemporaryDirectory() as folder, patch(
+            "app.preferences_path", return_value=Path(folder) / "preferences.json"
+        ), patch("app.piper_voice_directory", return_value=Path(folder)):
+            pending_before = set(root.tk.splitlist(root.tk.call("after", "info")))
+            agent = DesktopAgent(root)
+            pending_after = set(root.tk.splitlist(root.tk.call("after", "info")))
+            for callback in pending_after - pending_before:
+                self.addCleanup(root.after_cancel, callback)
+            self.addCleanup(
+                lambda: root.after_cancel(agent.face._eye_after)
+                if agent.face._eye_after is not None else None
+            )
+            root.update_idletasks()
+            brand_row = agent.face.canvas.master
+            brand_title = next(
+                child for child in brand_row.winfo_children()
+                if isinstance(child, tk.Frame)
+                and any(
+                    isinstance(item, tk.Label)
+                    and item.cget("text") == "Local Green Man Assistant"
+                    for item in child.winfo_children()
+                )
+            )
+            title = next(
+                child for child in brand_title.winfo_children()
+                if isinstance(child, tk.Label)
+                and child.cget("text") == "Local Green Man Assistant"
+            )
+            link = next(
+                child for child in brand_title.winfo_children()
+                if isinstance(child, tk.Label) and child.cget("text") == "Eye Guide"
+            )
+            self.assertGreaterEqual(
+                link.winfo_rooty(), title.winfo_rooty() + title.winfo_height()
+            )
+            self.assertGreaterEqual(
+                brand_title.winfo_rootx(),
+                agent.face.canvas.winfo_rootx() + agent.face.canvas.winfo_width(),
+            )
+            with patch.object(agent.face, "note_activity") as activity:
+                root.event_generate("<Motion>", x=5, y=5)
+                root.event_generate("<ButtonPress-1>", x=5, y=5)
+                agent.prompt.focus_force()
+                root.update()
+                agent.prompt.event_generate("<KeyRelease>", keysym="a")
+                self.assertGreaterEqual(activity.call_count, 3)
+            agent.face.sleeping = True
+            agent.face._set_lids(1.0)
+            agent.face._animate_sleep(agent.face._sleep_started)
+            root.event_generate("<Motion>", x=10, y=10)
+            self.assertFalse(agent.face.sleeping)
+            self.assertTrue(
+                all(
+                    agent.face.canvas.itemcget(item, "state") == "hidden"
+                    for item in agent.face._sleep_zs
+                )
+            )
+            self.assertEqual(link.cget("cursor"), "hand2")
+            self.assertEqual(str(link.cget("takefocus")), "1")
+            link.event_generate("<Button-1>")
+            self.assertIsNotNone(agent.eye_legend_dialog)
+            assert agent.eye_legend_dialog is not None
+            self.assertTrue(agent.eye_legend_dialog.winfo_exists())
+            for key in ("<Return>", "<space>"):
+                agent.eye_legend_dialog.destroy()
+                link.focus_force()
+                root.update()
+                link.event_generate(key)
+                self.assertTrue(agent.eye_legend_dialog.winfo_exists())
+
+    def test_animation_toggle_updates_face_and_legend(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.animations_enabled = Mock()
+        agent.face = Mock()
+        agent.eye_legend = Mock()
+        agent.eye_legend_dialog = Mock()
+        agent._save_preferences = Mock()
+
+        for enabled in (False, True):
+            agent.animations_enabled.get.return_value = enabled
+            agent._on_animations_toggled()
+            agent.face.set_animations.assert_called_with(enabled)
+            agent.eye_legend.set_animations.assert_called_with(enabled)
+        self.assertEqual(agent._save_preferences.call_count, 2)
+
+    def test_animation_toggle_without_open_guide(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.animations_enabled = Mock()
+        agent.animations_enabled.get.return_value = False
+        agent.face = Mock()
+        agent.eye_legend = None
+        agent.eye_legend_dialog = None
+        agent._save_preferences = Mock()
+
+        agent._on_animations_toggled()
+
+        agent.face.set_animations.assert_called_once_with(False)
+        agent._save_preferences.assert_called_once()
+
+    def test_popup_reuses_window_and_reopens_with_current_preference(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+        self.addCleanup(root.destroy)
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.root = root
+        agent.eye_legend = None
+        agent.eye_legend_dialog = None
+        agent.animations_enabled = tk.BooleanVar(root, value=False)
+        agent.face = Mock()
+        agent._save_preferences = Mock()
+
+        self.assertEqual(root.winfo_children(), [])
+        agent._open_eye_guide()
+        dialog = agent.eye_legend_dialog
+        legend = agent.eye_legend
+        self.assertIsNotNone(dialog)
+        self.assertIsNotNone(legend)
+        assert dialog is not None and legend is not None
+        self.assertEqual(dialog.title(), "Eye Guide")
+        self.assertIsNone(legend._after)
+        self.assertEqual(legend.frame.master, dialog)
+        root.update_idletasks()
+        self.assertIs(root.grab_current(), dialog)
+        self.assertEqual(dialog.resizable(), (0, 0))
+        self.assertGreaterEqual(dialog.winfo_width(), 240)
+        self.assertGreaterEqual(dialog.winfo_width(), dialog.winfo_reqwidth())
+        self.assertEqual(str(dialog.transient()), str(root))
+
+        agent._open_eye_guide()
+        self.assertIs(agent.eye_legend_dialog, dialog)
+        self.assertIs(agent.eye_legend, legend)
+        self.assertEqual(len(root.winfo_children()), 1)
+
+        agent.animations_enabled.set(True)
+        agent._on_animations_toggled()
+        self.assertIsNotNone(legend._after)
+        pending = legend._after
+        dialog.destroy()
+        self.assertIsNone(root.grab_current())
+        self.assertIsNone(legend._after)
+        self.assertNotIn(pending, root.tk.splitlist(root.tk.call("after", "info")))
+        agent._on_animations_toggled()
+        agent.animations_enabled.set(True)
+        agent._open_eye_guide()
+        self.assertIsNot(agent.eye_legend_dialog, dialog)
+        self.assertIsNot(agent.eye_legend, legend)
+        assert agent.eye_legend is not None
+        self.assertIsNotNone(agent.eye_legend._after)
+        assert agent.eye_legend_dialog is not None
+        self.assertIs(root.grab_current(), agent.eye_legend_dialog)
+        close_button = next(
+            child for child in agent.eye_legend_dialog.winfo_children()
+            if isinstance(child, tk.Button) and child.cget("text") == "Close"
+        )
+        close_button.invoke()
+        self.assertIsNone(root.grab_current())
+
+        agent._open_eye_guide()
+        dialog = agent.eye_legend_dialog
+        assert dialog is not None
+        root.update()
+        dialog.focus_force()
+        dialog.event_generate("<Escape>")
+        self.assertFalse(dialog.winfo_exists())
+        self.assertIsNone(root.grab_current())
+
+
+class SpeechControlTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.agent = DesktopAgent.__new__(DesktopAgent)
+        self.agent.root = Mock()
+        self.agent.face = Mock()
+        self.agent.speech = Mock()
+        self.agent.stop_speech_button = Mock()
+        self.agent._speech_events = queue.SimpleQueue()
+        self.agent._speech_event = None
+        self.agent._speech_events_after = None
+        self.agent.busy = False
+
+    def test_stop_interrupts_speech_and_prevents_queued_start(self) -> None:
+        event = Event()
+        self.agent.speech.speak_async.return_value = event
+        self.agent.speech.stop.side_effect = event.set
+        self.agent._speak("hello")
+        self.agent.stop_speech_button.config.assert_called_with(state="normal")
+        self.agent._speech_events.put(("start", event, (None, 0.04)))
+        self.agent._stop_speech()
+        self.agent._poll_speech_events()
+        self.agent.face.start_speaking.assert_not_called()
+        self.agent.face.stop_speaking.assert_called_once()
+        self.agent.stop_speech_button.config.assert_called_with(state="disabled")
+        self.assertTrue(event.is_set())
+
+    def test_stale_callbacks_do_not_interrupt_new_speech(self) -> None:
+        first, second = Event(), Event()
+        self.agent.speech.speak_async.side_effect = [first, second]
+        self.agent._speak("old")
+        self.agent._speak("new")
+        self.agent._speech_events.put(("stop", first, None))
+        self.agent._speech_events.put(("start", second, ([0.5], 0.04)))
+        self.agent._poll_speech_events()
+        self.agent.face.stop_speaking.assert_not_called()
+        self.agent.face.start_speaking.assert_called_once_with([0.5], 0.04)
+        self.agent._speech_events.put(("stop", second, None))
+        self.agent._poll_speech_events()
+        self.agent.face.stop_speaking.assert_called_once()
+        self.agent.stop_speech_button.config.assert_called_with(state="disabled")
+
+    def test_close_stops_speech_before_destroying_window(self) -> None:
+        calls = Mock()
+        calls.attach_mock(self.agent.speech, "speech")
+        calls.attach_mock(self.agent.root, "root")
+        self.agent._speech_events_after = "timer"
+        self.agent._close()
+        self.assertEqual(
+            calls.mock_calls,
+            [
+                unittest.mock.call.speech.stop(),
+                unittest.mock.call.root.after_cancel("timer"),
+                unittest.mock.call.root.destroy(),
+            ],
+        )
+
+
+class VoiceDirectoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root_path = Path(self.temp.name)
+        self.old = self.root_path / "old"
+        self.new = self.root_path / "new"
+        self.old.mkdir()
+        self.new.mkdir()
+        self.voice = self.old / "old.onnx"
+        self.voice.touch()
+        self.new_voice = self.new / "new.onnx"
+        self.new_voice.touch()
+        self.agent = DesktopAgent.__new__(DesktopAgent)
+        self.agent.root = Mock()
+        self.agent.piper_voice_directory = self.old
+        self.agent.piper_voice_models = [self.voice]
+        self.agent.voice_model_path = self.voice
+        self.agent.voice_choice = Mock()
+        self.agent.voice_selector = Mock()
+        self.agent.voice_directory_label = Mock()
+        self.agent.speech = Mock()
+        self.agent.status = Mock()
+        self.agent._save_preferences = Mock()
+
+    def test_select_directory_updates_models_and_saves(self) -> None:
+        with patch("app.filedialog.askdirectory", return_value=str(self.new)) as chooser:
+            self.agent._choose_voice_directory()
+        chooser.assert_called_once_with(
+            title="Choose a Piper voice model folder",
+            initialdir=str(self.old),
+            parent=self.agent.root,
+            mustexist=True,
+        )
+        self.assertEqual(self.agent.piper_voice_directory, self.new)
+        self.assertEqual(self.agent.piper_voice_models, [self.new_voice])
+        self.agent.voice_selector.configure.assert_called_once_with(
+            values=["System voice", self.new_voice.name]
+        )
+        self.agent.voice_directory_label.config.assert_called_once_with(text=str(self.new))
+        self.assertIsNone(self.agent.voice_model_path)
+        self.agent.voice_choice.set.assert_called_once_with("System voice")
+        self.agent.speech.stop.assert_called_once()
+        self.agent._save_preferences.assert_called_once()
+
+    def test_cancel_and_invalid_folder_leave_selection_unchanged(self) -> None:
+        for selected in ("", str(self.root_path / "missing")):
+            with self.subTest(selected=selected), patch(
+                "app.filedialog.askdirectory", return_value=selected
+            ):
+                self.agent._choose_voice_directory()
+                self.assertEqual(self.agent.piper_voice_directory, self.old)
+                self.assertEqual(self.agent.voice_model_path, self.voice)
+                self.agent._save_preferences.assert_not_called()
+        self.agent.status.set.assert_called_once()
+
+    def test_listing_error_preserves_current_folder(self) -> None:
+        with patch("app.filedialog.askdirectory", return_value=str(self.new)), patch(
+            "app.list_piper_voice_models", return_value=([], "Could not list voices")
+        ):
+            self.agent._choose_voice_directory()
+        self.assertEqual(self.agent.piper_voice_directory, self.old)
+        self.assertEqual(self.agent.voice_model_path, self.voice)
+        self.agent.status.set.assert_called_once_with("Could not list voices")
+        self.agent._save_preferences.assert_not_called()
+
+    def test_selecting_same_folder_keeps_current_voice(self) -> None:
+        with patch("app.filedialog.askdirectory", return_value=str(self.old)):
+            self.agent._choose_voice_directory()
+        self.assertEqual(self.agent.voice_model_path, self.voice)
+        self.agent.speech.stop.assert_not_called()
+        self.agent._save_preferences.assert_called_once()
+
+
+class VoiceDirectoryUITests(unittest.TestCase):
+    def test_choice_survives_restart_and_system_prompt_save(self) -> None:
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            preferences = base / "preferences.json"
+            voices = base / "voices"
+            voices.mkdir()
+            (voices / "voice.onnx").touch()
+            (voices / "voice.onnx.json").touch()
+            roots: list[tk.Tk] = []
+
+            def cleanup_root(root: tk.Tk) -> None:
+                for callback in root.tk.splitlist(root.tk.call("after", "info")):
+                    root.after_cancel(callback)
+                root.destroy()
+
+            def cleanup() -> None:
+                for root in roots:
+                    cleanup_root(root)
+
+            self.addCleanup(cleanup)
+            try:
+                root = TkinterDnD.Tk()
+            except tk.TclError as error:
+                self.skipTest(f"No display available: {error}")
+            roots.append(root)
+            with patch("app.preferences_path", return_value=preferences), patch(
+                "app.piper_voice_directory", return_value=base / "default"
+            ), patch("app.filedialog.askdirectory", return_value=str(voices)):
+                agent = DesktopAgent(root)
+                root.update_idletasks()
+                buttons = [
+                    widget for row in root.winfo_children()
+                    for widget in row.winfo_children()
+                    if isinstance(widget, tk.Button)
+                    and widget.cget("text") == "Voice Model Folder"
+                ]
+                self.assertEqual(len(buttons), 1)
+                for option in (
+                    "background", "foreground", "activebackground",
+                    "activeforeground", "disabledforeground", "relief",
+                ):
+                    self.assertEqual(
+                        buttons[0].cget(option), agent.workspace_button.cget(option)
+                    )
+                buttons[0].invoke()
+                agent.voice_choice.set("voice.onnx")
+                agent._on_voice_selected()
+                agent._open_system_prompt_editor()
+                dialog = next(
+                    child for child in root.winfo_children()
+                    if isinstance(child, tk.Toplevel)
+                    and child.title() == "Edit system prompt"
+                )
+                save_button = next(
+                    button for row in dialog.winfo_children()
+                    for button in row.winfo_children()
+                    if isinstance(button, tk.Button) and button.cget("text") == "Save"
+                )
+                save_button.invoke()
+                self.assertEqual(
+                    json.loads(preferences.read_text())["piper_voice_directory"],
+                    str(voices),
+                )
+                cleanup_root(root)
+                roots.remove(root)
+                second_root = TkinterDnD.Tk()
+                roots.append(second_root)
+                restored = DesktopAgent(second_root)
+                self.assertEqual(restored.piper_voice_directory, voices)
+                self.assertEqual(restored.voice_model_path, voices / "voice.onnx")
+                self.assertEqual(restored.voice_choice.get(), "voice.onnx")
+                self.assertEqual(restored.voice_directory_label.cget("text"), str(voices))
+
+
+class ModelLoadingUITests(unittest.TestCase):
+    def test_controls_disable_while_loading_and_restore_on_success_or_failure(self) -> None:
+        try:
+            root = TkinterDnD.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+
+        def cleanup() -> None:
+            for callback in root.tk.splitlist(root.tk.call("after", "info")):
+                root.after_cancel(callback)
+            root.destroy()
+
+        self.addCleanup(cleanup)
+        with TemporaryDirectory() as folder, patch(
+            "app.preferences_path", return_value=Path(folder) / "preferences.json"
+        ), patch("app.piper_voice_directory", return_value=Path(folder)):
+            agent = DesktopAgent(root)
+            agent._save_preferences = Mock()
+            controls = [
+                agent.workspace_button, agent.voice_directory_button,
+                agent.voice_checkbox, agent.stop_speech_button, agent.animations_checkbox,
+                agent.edit_system_prompt_button, agent.view_history_button,
+                agent.clear_attachment_button, agent.voice_selector,
+                agent.microphone_button, agent.new_chat_button,
+                agent.save_transcript_button, agent.model_selector, agent.send_button,
+                *agent.mode_buttons,
+            ]
+            for error in (None, "model load failed"):
+                with self.subTest(error=error):
+                    with patch("app.threading.Thread"):
+                        agent._begin_model_load("qwen3-vl:8b")
+                    for control in controls:
+                        self.assertEqual(str(control.cget("state")), "disabled")
+                    agent._finish_model_load("qwen3-vl:8b", "llama3.1:8b", error)
+                    for control in (
+                        agent.workspace_button, agent.voice_directory_button,
+                        agent.voice_checkbox, agent.animations_checkbox,
+                        agent.edit_system_prompt_button, agent.view_history_button,
+                        agent.microphone_button, agent.new_chat_button,
+                        agent.save_transcript_button,
+                    ):
+                        self.assertEqual(str(control.cget("state")), "normal")
+                    self.assertEqual(str(agent.voice_selector.cget("state")), "readonly")
+                    self.assertEqual(str(agent.model_selector.cget("state")), "readonly")
+                    self.assertEqual(
+                        str(agent.clear_attachment_button.cget("state")), "disabled"
+                    )
+                    self.assertEqual(str(agent.send_button.cget("state")), "disabled")
+
+            agent.clear_attachment_button.config(state="normal")
+            stop_event = Event()
+            agent.listening_event = stop_event
+            agent.is_listening = False
+            agent.microphone_button.config(state="disabled", cursor="")
+            with patch("app.threading.Thread"):
+                agent._begin_model_load("qwen3-vl:8b")
+            agent._finish_listening(stop_event, None)
+            self.assertEqual(str(agent.microphone_button.cget("state")), "disabled")
+            agent._finish_model_load("qwen3-vl:8b", "llama3.1:8b", "load failed")
+            self.assertEqual(str(agent.microphone_button.cget("state")), "normal")
+            self.assertEqual(str(agent.clear_attachment_button.cget("state")), "normal")
+            event = Event()
+            with patch.object(agent.speech, "speak_async", return_value=event), patch.object(
+                agent.speech, "stop", side_effect=event.set
+            ) as stop:
+                agent._speak("test")
+                self.assertEqual(str(agent.stop_speech_button.cget("state")), "normal")
+                agent.stop_speech_button.invoke()
+                stop.assert_called_once()
+                self.assertTrue(event.is_set())
+                self.assertEqual(str(agent.stop_speech_button.cget("state")), "disabled")
+
+
 class WorkspacePathTests(unittest.TestCase):
+    def test_voice_directory_preferences_round_trip_and_default(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            preferences = root / "preferences.json"
+            default = root / "default"
+            with patch("app.piper_voice_directory", return_value=default):
+                self.assertEqual(load_piper_voice_directory(preferences), (default, None))
+                self.assertIsNone(
+                    save_user_preferences(
+                        preferences, None, "Questions only", piper_directory=root
+                    )
+                )
+                self.assertEqual(load_piper_voice_directory(preferences), (root, None))
+                missing = root / "removed"
+                self.assertIsNone(
+                    save_user_preferences(
+                        preferences, None, "Questions only", piper_directory=missing
+                    )
+                )
+                restored, error = load_piper_voice_directory(preferences)
+                self.assertEqual(restored, missing)
+                self.assertIn("not available", error or "")
+
     def test_lists_piper_voice_models_in_filename_order(self) -> None:
         with TemporaryDirectory() as folder:
             directory = Path(folder)
@@ -2609,6 +3092,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.prompt = Mock()
         agent.url_entry = Mock()
         agent.workspace_button = Mock()
+        agent.voice_directory_button = Mock()
         agent.working_indicator = Mock()
         agent.attachment_status = Mock()
         agent.cancel_event = Event()
@@ -2631,6 +3115,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.prompt.config.assert_called_once_with(state="normal")
         agent.url_entry.config.assert_called_once_with(state="normal")
         agent.workspace_button.config.assert_called_once_with(state="normal")
+        agent.voice_directory_button.config.assert_called_once_with(state="normal")
         agent.working_indicator.pack_forget.assert_called_once_with()
         self.assertIsNone(agent.cancel_event)
         agent.working_indicator.pack_forget.assert_called_once_with()
@@ -2725,6 +3210,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.model_selector = Mock()
         agent.url_entry = Mock()
         agent.workspace_button = Mock()
+        agent.voice_directory_button = Mock()
         agent.working_indicator = Mock()
         agent.mode_buttons = []
         agent.status = Mock()
@@ -2759,6 +3245,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.prompt.config.assert_called_once_with(state="disabled")
         agent.url_entry.config.assert_called_once_with(state="disabled")
         agent.workspace_button.config.assert_called_once_with(state="disabled")
+        agent.voice_directory_button.config.assert_called_once_with(state="disabled")
         agent._start_progress_animation.assert_called_once_with()
         agent._clear_pending_image.assert_called_once_with()
         agent.attachment_status.set.assert_called_once_with("")
@@ -2938,7 +3425,9 @@ class DesktopSafetyTests(unittest.TestCase):
     def test_successful_model_load_activates_model_and_starts_new_chat(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.speech = Mock()
+        agent._speak = Mock()
         agent.busy = True
+        agent._model_load_control_states = []
         agent.active_model = "llama3.1:8b"
         agent.model_selector = Mock()
         agent.url_entry = Mock()
@@ -2957,7 +3446,7 @@ class DesktopSafetyTests(unittest.TestCase):
         agent.voice_enabled = Mock(get=Mock(return_value=True))
 
         agent._finish_model_load("qwen3-vl:8b", "llama3.1:8b", None)
-        agent.speech.speak_async.assert_called_once_with("Ready")
+        agent._speak.assert_called_once_with("Ready")
 
         self.assertEqual(agent.active_model, "qwen3-vl:8b")
         self.assertEqual(agent.messages[0]["role"], "system")
@@ -2975,6 +3464,7 @@ class DesktopSafetyTests(unittest.TestCase):
     def test_failed_model_load_restores_previous_selection(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
         agent.busy = True
+        agent._model_load_control_states = []
         agent.active_model = "llama3.1:8b"
         agent.model_selector = Mock()
         agent.url_entry = Mock()

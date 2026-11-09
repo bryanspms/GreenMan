@@ -148,10 +148,13 @@ mkdir -p ~/.local/share/piper-voices
   --data-dir ~/.local/share/piper-voices
 ```
 
-Models are stored in `~/.local/share/piper-voices/`. Green Man lists the `.onnx`
-files in that folder in its **Voice** dropdown, with **System voice** as the first
-and default choice. The list refreshes when you open the dropdown. Launch Green Man
-with that same environment so it can find Piper:
+By default, Green Man looks for models in `~/.local/share/piper-voices/` (or
+`$XDG_DATA_HOME/piper-voices`). Select **Voice Model Folder** beside the **Voice** dropdown
+to choose a different folder; the selection is remembered between sessions.
+The dropdown lists the folder's `.onnx` files, with **System voice** as the first
+and default choice, and refreshes when opened. Changing folders resets an
+unavailable selected model to **System voice**. Launch Green Man with that same
+environment so it can find Piper:
 
 ```bash
 .venv/bin/python app.py
@@ -336,26 +339,45 @@ again to stop. Review or edit the recognized text before sending.
 
 Spoken responses are disabled by default. The voice selection is saved with your
 local preferences. **System voice** uses `espeak-ng`, `espeak`, or `spd-say` from
-Speech Dispatcher.
+Speech Dispatcher. Click **Stop speaking** to interrupt the current response
+without turning off spoken responses; closing Green Man also stops playback.
+With the `spd-say` fallback, Speech Dispatcher may continue audio after its
+client exits. Use Piper, `espeak-ng`, or `espeak` for reliable interruption.
 
 ### <span style="color: #2f6b3f;">Animated face</span>
 
-The Green Man face at the top left is drawn with Tkinter. By default he blinks now
-and then, and his eyes glance around while idle. While a response is spoken
-aloud, his eyes settle on the user, his mouth opens and closes, and his eyebrows
-lift for emphasis.
+The Green Man face at the top left is drawn with Tkinter. By default he blinks and
+twitches his nose now and then, and his eyes glance around while idle. While a
+response is spoken aloud, he wears reading glasses, his eyes settle on the user,
+his mouth opens and closes, and his eyebrows lift for emphasis. The glasses
+disappear when he stops speaking.
+
+After 60 seconds without activity in the app, Green Man blinks slowly three
+times and yawns with half-closed eyes before closing them, putting on a nightcap,
+and letting sleepy Z's float from his mouth. The nightcap disappears when he wakes.
+Mouse or keyboard activity interrupts this sequence or wakes him. He stays
+awake while loading a model, waiting for a response, recording, or speaking,
+and the idle countdown restarts when those activities finish.
 
 His eyes also show what the app is doing:
 
 | State | Eyes |
 | --- | --- |
-| Model loading | Pupils move in a circle |
+| Model loading | Pupils move in a circle without blinking |
 | Waiting for a response | Eyes turn yellow and look fully left and right |
 | Microphone recording | Eyes turn red |
+| Speaking | Eyes look forward behind reading glasses |
+| Sleeping | Slow blinks and a yawn after a minute of inactivity, then closed eyes |
+
+Select **Eye Guide** below the title beside Green Man to open a small window
+showing examples of these states, along with idle and speaking eyes. Its
+examples stop moving when animations are turned off. Close the guide with its
+**Close** button or Escape before returning to the main window.
 
 Untick **Green Man Animations** (beside **Read responses aloud**) to keep the face
-still and neutral: no blinking, glancing, lip movement, or colored eyes. The
-choice is saved in local preferences; it is on by default.
+still and neutral: no blinking, nose twitching, glancing, sleep animation, lip
+movement, or colored eyes. The choice is saved in local preferences; it is on
+by default.
 
 With a Piper voice, the mouth follows the loudness of the generated audio, so it
 matches the actual speech. With the **System voice** engines (`espeak-ng`,
