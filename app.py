@@ -28,6 +28,7 @@ from desktop_applications import DesktopApplication, DesktopApplicationLauncher
 from wayland_portal import WaylandDesktopPortal
 from gnome_shell_windows import GnomeShellWindows
 from window_accessibility import AccessibleWindow, AccessibleWindowController
+from document_reader_ui import DocumentReaderUI
 
 
 IMAGE_DROP_HINT = "Drop a PNG, JPEG, or WebP image onto the message box to attach it."
@@ -1329,6 +1330,8 @@ class DesktopAgent:
             on_pause=lambda event: self._speech_events.put(("pause", event, None)),
             on_resume=lambda event: self._speech_events.put(("resume", event, None)),
         )
+        self._document_reading_cancel_event: Event | None = None
+        self._document_reading_event_id: int | None = None
         self.listening_event: Event | None = None
         self.is_listening = False
         self.system_status_after: str | None = None
@@ -1380,10 +1383,48 @@ class DesktopAgent:
     def _on_user_activity(self, _event: tk.Event) -> None:
         self.face.note_activity()
 
+    def _register_document_speech_event(self, cancel_event: Event) -> None:
+        """Register a cancel_event from document reading and start face animations."""
+        self._document_reading_cancel_event = cancel_event
+        self._document_reading_event_id = id(cancel_event)
+        print(f"DEBUG: Registered document reading cancel_event: {self._document_reading_event_id}", flush=True)
+        # Don't start speaking yet - wait for the SpeechPlayer's on_start callback
+        # which will provide the real envelope data
+
+    def _on_document_speech_actually_started(self, cancel_event: Event, envelope: Optional[list[float]], window_seconds: float) -> None:
+        """Called when document reading audio actually starts (from SpeechPlayer.on_start)."""
+        print(f"DEBUG: _on_document_speech_actually_started called with envelope={bool(envelope)}, window={window_seconds}", flush=True)
+        # Store the envelope info so the highlighting thread can use it for better timing
+        self.document_reader_ui.current_envelope = envelope
+        self.document_reader_ui.current_window_seconds = window_seconds
+        # Signal the highlighting thread to start highlighting words now that audio is playing
+        self.document_reader_ui.speech_actually_started.set()
+
     def _poll_speech_events(self) -> None:
+        print(f"DEBUG: _poll_speech_events called, queue empty={self._speech_events.empty()}", flush=True)
         while not self._speech_events.empty():
             kind, event, payload = self._speech_events.get_nowait()
+            print(f"DEBUG: _poll_speech_events received: kind={kind}, event={id(event)}, doc_event={id(self._document_reading_cancel_event) if self._document_reading_cancel_event else 'None'}, speech_event={id(self._speech_event) if self._speech_event else 'None'}", flush=True)
+            
             if event is not self._speech_event:
+                # Check if this is from document reading
+                if kind == "start" and event is self._document_reading_cancel_event:
+                    print(f"DEBUG: DOCUMENT READING START EVENT! Calling face.start_speaking with envelope", flush=True)
+                    # Audio actually started for document reading - clear waiting state and start animations
+                    self.face.set_waiting(False)
+                    assert isinstance(payload, tuple)
+                    self.face.start_speaking(*payload)
+                    # Signal the highlighting thread that audio has actually started
+                    if self.document_reader_ui.on_speech_actually_started:
+                        self.document_reader_ui.on_speech_actually_started(event, payload[0], payload[1])
+                elif kind == "stop" and event is self._document_reading_cancel_event:
+                    print(f"DEBUG: DOCUMENT READING CHUNK COMPLETE (not stopping document reading yet)")
+                    # Document reading audio for this chunk finished
+                    # Do NOT clear the document reading event - the reading loop will continue with next chunk
+                    # Only stop face speaking briefly between chunks
+                    self.face.stop_speaking()
+                else:
+                    print(f"DEBUG: Non-document-reading event, skipping")
                 continue
             if kind == "start" and not event.is_set():
                 assert isinstance(payload, tuple)
@@ -1425,6 +1466,84 @@ class DesktopAgent:
         self._speech_event = self.speech.speak_async(text)
         if not self.busy:
             self.stop_speech_button.config(state=tk.NORMAL)
+
+    def _display_reading_text(self, text: str) -> None:
+        """Display text being read from document in the transcript."""
+        self.transcript.config(state=tk.NORMAL)
+        
+        # Clear previous content and any highlighting
+        self.transcript.delete("1.0", tk.END)
+        self.transcript.tag_remove("current_step", "1.0", tk.END)
+        
+        # Insert the new text
+        self.transcript.insert(tk.END, text)
+        
+        # Note: Do NOT highlight the entire text here. Let the highlighting thread
+        # handle highlighting as speech plays. This ensures proper synchronization.
+        
+        # Make it read-only
+        self.transcript.config(state=tk.DISABLED)
+
+    def _highlight_word_in_transcript(self, word: str, start: int, end: int) -> None:
+        """Highlight a specific word in the transcript as it's being spoken."""
+        # Show first 50 chars of word (may contain newlines)
+        word_preview = word[:50].replace('\n', '\\n') if word else ""
+        print(f"DEBUG: _highlight_word_in_transcript called with word_len={len(word)}, preview='{word_preview}', start={start}, end={end}", flush=True)
+        
+        self.transcript.config(state=tk.NORMAL)
+        
+        # Remove all highlighting
+        self.transcript.tag_remove("current_step", "1.0", tk.END)
+        
+        # Convert character positions to Tkinter line.column format
+        full_text = self.transcript.get("1.0", tk.END)
+        
+        print(f"DEBUG: full_text length={len(full_text)}, word length={len(word)}", flush=True)
+        
+        # The transcript.get("1.0", tk.END) returns text with a trailing newline
+        # Remove it for position calculation
+        full_text_without_final_newline = full_text.rstrip('\n')
+        
+        # Adjust start and end if they're beyond the actual text
+        actual_end = min(end, len(full_text_without_final_newline))
+        
+        # Function to convert character position to Tkinter line.column format
+        def char_pos_to_tkinter(char_pos):
+            if char_pos < 0 or char_pos > len(full_text_without_final_newline):
+                return None
+            line = 1
+            col = 0
+            for i in range(char_pos):
+                if i < len(full_text_without_final_newline) and full_text_without_final_newline[i] == '\n':
+                    line += 1
+                    col = 0
+                else:
+                    col += 1
+            return f"{line}.{col}"
+        
+        start_pos = char_pos_to_tkinter(start)
+        end_pos = char_pos_to_tkinter(actual_end)
+        
+        if start_pos is None or end_pos is None:
+            print(f"DEBUG: Position conversion failed (start={start}, end={end}), highlighting all text")
+            self.transcript.tag_add("current_step", "1.0", tk.END)
+        else:
+            print(f"DEBUG: Setting tag from {start_pos} to {end_pos}")
+            # Apply highlighting
+            try:
+                self.transcript.tag_add("current_step", start_pos, end_pos)
+            except tk.TclError as e:
+                # If position is invalid, highlight all text
+                print(f"DEBUG: Position invalid ({e}), highlighting all text")
+                self.transcript.tag_add("current_step", "1.0", tk.END)
+        
+        self.transcript.config(state=tk.DISABLED)
+
+    def _stop_document_reading(self) -> None:
+        """Stop face animations when document reading finishes."""
+        self.face.stop_speaking()
+        # Clear the document reading event so we stop matching document reading events
+        self._document_reading_cancel_event = None
 
     def _stop_speech(self) -> None:
         self.speech.stop()
@@ -1726,6 +1845,19 @@ class DesktopAgent:
             )
             button.pack(side=tk.LEFT, padx=(0, 8))
             self.mode_buttons.append(button)
+
+        # Document Reader UI
+        self.document_reader_ui = DocumentReaderUI(
+            self.root, 
+            self.speech, 
+            on_text_ready=self._display_reading_text,
+            on_waiting_changed=self.face.set_waiting,
+            on_speech_started=self._register_document_speech_event,
+            on_word_highlight=self._highlight_word_in_transcript,
+            on_reading_finished=self._stop_document_reading,
+            on_speech_actually_started=self._on_document_speech_actually_started,
+        )
+        self.document_reader_ui.pack(fill=tk.X, padx=0, pady=(4, 4))
 
         self.transcript = scrolledtext.ScrolledText(
             self.root,

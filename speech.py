@@ -209,6 +209,8 @@ class SpeechPlayer:
         finally:
             if self._on_stop is not None:
                 self._on_stop(cancel_event)
+            # Signal that this speech chunk has completed
+            cancel_event.set()
             with self.process_lock:
                 if self.cancel_event is cancel_event:
                     self.cancel_event = None
@@ -350,6 +352,10 @@ class SpeechPlayer:
                     self._pausable = False
                     self._dispatcher = False
                     self._paused = False
+            # Signal that this speech chunk has completed
+            if self._on_stop is not None:
+                self._on_stop(cancel_event)
+            cancel_event.set()
 
     def _speak_with_piper(self, text: str, cancel_event: Event) -> None:
         voice_model = self._voice_model_provider()
@@ -402,3 +408,7 @@ class SpeechPlayer:
         finally:
             if temporary_path is not None:
                 Path(temporary_path).unlink(missing_ok=True)
+            # Signal that this speech chunk has completed
+            if self._on_stop is not None:
+                self._on_stop(cancel_event)
+            cancel_event.set()

@@ -4,3 +4,7 @@ dbus-next>=0.2.3
 tkinterdnd2>=0.4.2
 vosk>=0.3.45
 sounddevice>=0.5.1
+PyPDF2>=3.0.0
+ebooklib>=0.18
+python-docx>=0.8.11
+odfpy>=1.4.1
