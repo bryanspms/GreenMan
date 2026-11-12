@@ -2982,6 +2982,7 @@ class DesktopAgent:
         self.transcript.tag_remove("current_step", "1.0", tk.END)
 
     def _append(self, speaker: str, text: str) -> None:
+        print(f"DEBUG _append: speaker={repr(speaker)}, text={repr(text[:100])}", flush=True)
         self.transcript.config(state=tk.NORMAL)
         
         # Insert speaker label in plain text
