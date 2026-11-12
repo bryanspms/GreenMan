@@ -29,7 +29,7 @@ from wayland_portal import WaylandDesktopPortal
 from gnome_shell_windows import GnomeShellWindows
 from window_accessibility import AccessibleWindow, AccessibleWindowController
 from document_reader_ui import DocumentReaderUI
-from markdown_text_widget import MarkdownText
+from markdown_text_widget import MarkdownText, strip_markdown
 
 
 IMAGE_DROP_HINT = "Drop a PNG, JPEG, or WebP image onto the message box to attach it."
@@ -1472,7 +1472,10 @@ class DesktopAgent:
         self.face.stop_speaking()
         self._speech_paused = False
         self._speech_pause_pending = False
-        self._speech_event = self.speech.speak_async(text)
+        # Strip Markdown syntax before speaking so the speech system doesn't
+        # try to pronounce ** or ` characters
+        plain_text = strip_markdown(text)
+        self._speech_event = self.speech.speak_async(plain_text)
         if not self.busy:
             self.stop_speech_button.config(state=tk.NORMAL)
 

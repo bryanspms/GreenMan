@@ -7,6 +7,37 @@ import tkinter as tk
 from tkinter import scrolledtext, font as tkfont
 
 
+def strip_markdown(text: str) -> str:
+    """Remove Markdown syntax from text, leaving only plain text content.
+    
+    Removes: **bold**, __bold__, *italic*, _italic_, `code`, # headers, > blockquotes
+    
+    Args:
+        text: Text containing Markdown syntax
+        
+    Returns:
+        Plain text with all Markdown syntax removed
+    """
+    # Remove headers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    
+    # Remove blockquotes
+    text = re.sub(r'^>\s*', '', text, flags=re.MULTILINE)
+    
+    # Remove bold (**text** and __text__)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    
+    # Remove italic (*text* and _text_)
+    text = re.sub(r'\*(?!\*)([^\*]+?)\*(?!\*)', r'\1', text)
+    text = re.sub(r'_(?!_)([^_]+?)_(?!_)', r'\1', text)
+    
+    # Remove code (`text`)
+    text = re.sub(r'`([^`]+?)`', r'\1', text)
+    
+    return text
+
+
 class MarkdownText(scrolledtext.ScrolledText):
     """A ScrolledText widget that renders basic Markdown formatting."""
     
