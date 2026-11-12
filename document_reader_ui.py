@@ -59,6 +59,7 @@ class DocumentReaderUI:
         
         self.reading_session: Optional[ReadingSession] = None
         self.is_reading = False
+        self.is_paused = False  # Track if reading is currently paused
         self.current_cancel_event: Optional[Event] = None
         self.speech_actually_started: Event = Event()  # Signals when audio playback actually begins
         self.current_envelope: Optional[list[float]] = None  # Audio envelope for current speech
@@ -416,10 +417,16 @@ class DocumentReaderUI:
         # Wait for the speech to complete
         # Keep highlighting until either:
         # 1. The audio duration has elapsed, OR
-        # 2. The speech naturally completes (cancel_event is set)
+        # 2. The speech naturally completes (cancel_event is set), OR
+        # 3. Reading is paused or stopped
         start_time = time.time()
         while True:
             elapsed = time.time() - start_time
+            
+            # Check if reading was paused
+            if self.is_paused:
+                print(f"DEBUG: Speech paused (elapsed {elapsed:.1f}s)", flush=True)
+                break
             
             # Check if we've waited long enough based on duration
             if elapsed >= audio_duration:
@@ -438,6 +445,11 @@ class DocumentReaderUI:
             
             time.sleep(0.05)  # Check every 50ms
         
+        # Remove highlighting when done
+        print(f"DEBUG: Removing highlight", flush=True)
+        if self.on_word_highlight:
+            self.parent.after(0, lambda: self.on_word_highlight("", 0, 0))
+        
         # Un-highlight at the end
         print(f"DEBUG: Chunk done, removing highlight", flush=True)
 
@@ -445,6 +457,7 @@ class DocumentReaderUI:
         """Pause the current reading session."""
         if self.current_cancel_event and hasattr(self.speech_player, 'set_paused'):
             if self.speech_player.set_paused(True, self.current_cancel_event):
+                self.is_paused = True
                 self.pause_button.config(state=tk.DISABLED)
                 self.resume_button.config(state=tk.NORMAL)
                 self.status_label.config(text="Reading paused", fg="blue")
@@ -454,6 +467,7 @@ class DocumentReaderUI:
         """Resume the paused reading session."""
         if self.current_cancel_event and hasattr(self.speech_player, 'set_paused'):
             if self.speech_player.set_paused(False, self.current_cancel_event):
+                self.is_paused = False
                 self.resume_button.config(state=tk.DISABLED)
                 self.pause_button.config(state=tk.NORMAL)
                 self.status_label.config(text="Resuming reading...", fg="blue")
@@ -461,6 +475,7 @@ class DocumentReaderUI:
     def _stop_reading(self) -> None:
         """Stop the reading session completely."""
         self.is_reading = False
+        self.is_paused = False
 
         if self.current_cancel_event:
             self.current_cancel_event.set()
