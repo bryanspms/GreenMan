@@ -2980,7 +2980,17 @@ class DesktopAgent:
 
     def _append(self, speaker: str, text: str) -> None:
         self.transcript.config(state=tk.NORMAL)
-        self.transcript.insert(tk.END, f"{speaker}: {text}\n\n")
+        
+        # Insert speaker label in plain text
+        speaker_prefix = f"{speaker}: "
+        self.transcript.insert(tk.END, speaker_prefix)
+        
+        # Append the message text with Markdown formatting
+        self.transcript.append_markdown(text)
+        
+        # Add spacing after the message
+        self.transcript.insert(tk.END, "\n\n")
+        
         self.transcript.see(tk.END)
         self.transcript.config(state=tk.DISABLED)
 

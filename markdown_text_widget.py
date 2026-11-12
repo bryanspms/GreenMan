@@ -58,7 +58,7 @@ class MarkdownText(scrolledtext.ScrolledText):
         )
 
     def insert_markdown(self, text: str) -> None:
-        """Insert text with Markdown formatting applied."""
+        """Replace all content with text with Markdown formatting applied."""
         was_disabled = self.cget("state") == tk.DISABLED
         self.config(state=tk.NORMAL)
         
@@ -66,6 +66,17 @@ class MarkdownText(scrolledtext.ScrolledText):
         self.delete("1.0", tk.END)
         
         # Parse and insert the markdown text
+        self._parse_and_insert_markdown(text)
+        
+        if was_disabled:
+            self.config(state=tk.DISABLED)
+
+    def append_markdown(self, text: str) -> None:
+        """Append text with Markdown formatting applied to existing content."""
+        was_disabled = self.cget("state") == tk.DISABLED
+        self.config(state=tk.NORMAL)
+        
+        # Parse and append the markdown text (don't clear)
         self._parse_and_insert_markdown(text)
         
         if was_disabled:
@@ -115,8 +126,8 @@ class MarkdownText(scrolledtext.ScrolledText):
             # Look for patterns starting at current position
             # Order matters: check longer patterns first
             
-            # Check for **bold**
-            bold_match = re.match(r'\*\*([^\*]+?)\*\*', text[pos:])
+            # Check for **bold** (must be at least one character between)
+            bold_match = re.match(r'\*\*(.+?)\*\*', text[pos:])
             if bold_match:
                 content = bold_match.group(1)
                 start_pos = tk.END
@@ -125,8 +136,8 @@ class MarkdownText(scrolledtext.ScrolledText):
                 pos += len(bold_match.group(0))
                 continue
             
-            # Check for __bold__
-            bold_match = re.match(r'__([^_]+?)__', text[pos:])
+            # Check for __bold__ (must be at least one character between)
+            bold_match = re.match(r'__(.+?)__', text[pos:])
             if bold_match:
                 content = bold_match.group(1)
                 start_pos = tk.END
@@ -146,7 +157,8 @@ class MarkdownText(scrolledtext.ScrolledText):
                 continue
             
             # Check for *italic* (but not **)
-            italic_match = re.match(r'\*([^\*]+?)\*', text[pos:])
+            # Use negative lookahead/lookbehind to avoid matching ** patterns
+            italic_match = re.match(r'\*(?!\*)([^\*]+?)\*(?!\*)', text[pos:])
             if italic_match:
                 content = italic_match.group(1)
                 start_pos = tk.END
@@ -156,7 +168,7 @@ class MarkdownText(scrolledtext.ScrolledText):
                 continue
             
             # Check for _italic_ (but not __)
-            italic_match = re.match(r'_([^_]+?)_', text[pos:])
+            italic_match = re.match(r'_(?!_)([^_]+?)_(?!_)', text[pos:])
             if italic_match:
                 content = italic_match.group(1)
                 start_pos = tk.END
