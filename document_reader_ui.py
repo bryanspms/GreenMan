@@ -68,6 +68,10 @@ class DocumentReaderUI:
         # Load last selected folder from config
         self.last_folder_path = self._load_last_folder()
         
+        # Collapse state
+        self.is_collapsed = self._load_collapse_state()
+        self.collapsible_widgets: list[tk.Widget] = []
+        
         # Create the document reader frame
         self.frame = tk.LabelFrame(parent, text="📚 Document Reader", padx=10, pady=10)
         self._build_ui()
@@ -75,9 +79,25 @@ class DocumentReaderUI:
     def _build_ui(self) -> None:
         """Build the document reader UI components."""
         
+        # Header row with collapse button
+        header_row = tk.Frame(self.frame)
+        header_row.pack(fill=tk.X, pady=(0, 10))
+        
+        self.collapse_button = tk.Button(
+            header_row,
+            text="▼" if not self.is_collapsed else "▶",
+            command=self._toggle_collapse,
+            width=3,
+            relief=tk.FLAT,
+        )
+        self.collapse_button.pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Label(header_row, text="Contents:").pack(side=tk.LEFT)
+        
         # File selection row
         file_row = tk.Frame(self.frame)
         file_row.pack(fill=tk.X, pady=(0, 10))
+        self.collapsible_widgets.append(file_row)
 
         self.file_label = tk.Label(file_row, text="No document selected", wraplength=300)
         self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -93,6 +113,7 @@ class DocumentReaderUI:
         # Reading controls row
         control_row = tk.Frame(self.frame)
         control_row.pack(fill=tk.X, pady=(0, 10))
+        self.collapsible_widgets.append(control_row)
 
         self.start_button = tk.Button(
             control_row,
@@ -133,6 +154,7 @@ class DocumentReaderUI:
         # Progress row
         progress_row = tk.Frame(self.frame)
         progress_row.pack(fill=tk.X, pady=(0, 10))
+        self.collapsible_widgets.append(progress_row)
 
         tk.Label(progress_row, text="Progress:").pack(side=tk.LEFT)
 
@@ -152,6 +174,7 @@ class DocumentReaderUI:
         # Settings row
         settings_row = tk.Frame(self.frame)
         settings_row.pack(fill=tk.X, pady=(0, 10))
+        self.collapsible_widgets.append(settings_row)
 
         tk.Label(settings_row, text="Chunk by:").pack(side=tk.LEFT)
 
@@ -173,6 +196,10 @@ class DocumentReaderUI:
             wraplength=400,
         )
         self.status_label.pack(fill=tk.X, pady=(0, 5))
+        self.collapsible_widgets.append(self.status_label)
+        
+        # Apply initial collapse state
+        self._update_collapse_state()
 
     def _load_last_folder(self) -> Optional[str]:
         """Load the last selected folder from config file."""
@@ -196,6 +223,45 @@ class DocumentReaderUI:
             self.last_folder_path = str(folder_path)
         except Exception as e:
             print(f"DEBUG: Error saving folder config: {e}", flush=True)
+
+    def _load_collapse_state(self) -> bool:
+        """Load the collapse state from config file."""
+        config_file = Path.home() / ".greenman_document_collapsed"
+        if config_file.exists():
+            try:
+                with open(config_file, 'r') as f:
+                    return f.read().strip().lower() == 'true'
+            except Exception as e:
+                print(f"DEBUG: Error loading collapse state: {e}", flush=True)
+        return False
+
+    def _save_collapse_state(self, collapsed: bool) -> None:
+        """Save the collapse state to config file."""
+        try:
+            config_file = Path.home() / ".greenman_document_collapsed"
+            with open(config_file, 'w') as f:
+                f.write('true' if collapsed else 'false')
+        except Exception as e:
+            print(f"DEBUG: Error saving collapse state: {e}", flush=True)
+
+    def _toggle_collapse(self) -> None:
+        """Toggle the collapse state of the document reader."""
+        self.is_collapsed = not self.is_collapsed
+        self._save_collapse_state(self.is_collapsed)
+        self._update_collapse_state()
+
+    def _update_collapse_state(self) -> None:
+        """Update the visibility of collapsible widgets based on collapse state."""
+        if self.is_collapsed:
+            # Hide all collapsible widgets
+            for widget in self.collapsible_widgets:
+                widget.pack_forget()
+            self.collapse_button.config(text="▶")
+        else:
+            # Show all collapsible widgets
+            for widget in self.collapsible_widgets:
+                widget.pack(fill=tk.X, pady=(0, 10))
+            self.collapse_button.config(text="▼")
 
     def _open_document(self) -> None:
         """Open a file dialog to select a document."""
