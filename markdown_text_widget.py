@@ -151,70 +151,55 @@ class MarkdownText(scrolledtext.ScrolledText):
             self._format_inline_markdown(line)
 
     def _format_inline_markdown(self, text: str) -> None:
-        """Format inline Markdown elements (bold, italic, code)."""
-        # Process the line character by character, looking for patterns
+        """Format inline Markdown elements (bold, italic, code) using regex substitution."""
+        # Use a list to track replacements and their positions
+        # We'll process the text and rebuild it with tags
         pos = 0
         
+        # Process patterns in order of priority: bold, code, italic
+        # We need to handle overlapping patterns carefully
+        
         while pos < len(text):
-            # Look for patterns starting at current position
-            # Order matters: check longer patterns first
+            # Try to find the nearest Markdown pattern
+            patterns = [
+                (r'\*\*(.+?)\*\*', 'bold'),      # **bold**
+                (r'__(.+?)__', 'bold'),           # __bold__
+                (r'`([^`]+?)`', 'code'),          # `code`
+                (r'\*(?!\*)([^\*]+?)\*(?!\*)', 'italic'),  # *italic* (not **)
+                (r'_(?!_)([^_]+?)_(?!_)', 'italic'),       # _italic_ (not __)
+            ]
             
-            # Check for **bold** (must be at least one character between)
-            bold_match = re.match(r'\*\*(.+?)\*\*', text[pos:])
-            if bold_match:
-                content = bold_match.group(1)
-                start_index = self.index(tk.END)
-                self.insert(tk.END, content)
-                end_index = self.index(tk.END)
-                self.tag_add("bold", start_index, end_index)
-                pos += len(bold_match.group(0))
-                continue
+            nearest_match = None
+            nearest_pos = len(text)
+            nearest_tag = None
+            nearest_pattern = None
             
-            # Check for __bold__ (must be at least one character between)
-            bold_match = re.match(r'__(.+?)__', text[pos:])
-            if bold_match:
-                content = bold_match.group(1)
-                start_index = self.index(tk.END)
-                self.insert(tk.END, content)
-                end_index = self.index(tk.END)
-                self.tag_add("bold", start_index, end_index)
-                pos += len(bold_match.group(0))
-                continue
+            # Find the nearest matching pattern
+            for pattern, tag in patterns:
+                match = re.search(pattern, text[pos:])
+                if match and match.start() < nearest_pos:
+                    nearest_match = match
+                    nearest_pos = pos + match.start()
+                    nearest_tag = tag
+                    nearest_pattern = pattern
             
-            # Check for `code`
-            code_match = re.match(r'`([^`]+?)`', text[pos:])
-            if code_match:
-                content = code_match.group(1)
-                start_index = self.index(tk.END)
-                self.insert(tk.END, content)
-                end_index = self.index(tk.END)
-                self.tag_add("code", start_index, end_index)
-                pos += len(code_match.group(0))
-                continue
+            if nearest_match is None:
+                # No more patterns found, insert the rest of the text
+                self.insert(tk.END, text[pos:])
+                break
             
-            # Check for *italic* (but not **)
-            # Use negative lookahead/lookbehind to avoid matching ** patterns
-            italic_match = re.match(r'\*(?!\*)([^\*]+?)\*(?!\*)', text[pos:])
-            if italic_match:
-                content = italic_match.group(1)
-                start_index = self.index(tk.END)
-                self.insert(tk.END, content)
-                end_index = self.index(tk.END)
-                self.tag_add("italic", start_index, end_index)
-                pos += len(italic_match.group(0))
-                continue
+            # Insert text before the match
+            text_before = text[pos:pos + nearest_match.start()]
+            if text_before:
+                self.insert(tk.END, text_before)
             
-            # Check for _italic_ (but not __)
-            italic_match = re.match(r'_(?!_)([^_]+?)_(?!_)', text[pos:])
-            if italic_match:
-                content = italic_match.group(1)
-                start_index = self.index(tk.END)
-                self.insert(tk.END, content)
-                end_index = self.index(tk.END)
-                self.tag_add("italic", start_index, end_index)
-                pos += len(italic_match.group(0))
-                continue
+            # Insert the matched content with tag
+            content = nearest_match.group(1)
+            start_index = self.index(tk.END)
+            self.insert(tk.END, content)
+            end_index = self.index(tk.END)
+            self.tag_add(nearest_tag, start_index, end_index)
             
-            # No pattern found, insert plain character
-            self.insert(tk.END, text[pos])
-            pos += 1
+            # Move position forward
+            pos += nearest_match.start() + len(nearest_match.group(0))
+
