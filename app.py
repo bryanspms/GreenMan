@@ -29,6 +29,7 @@ from wayland_portal import WaylandDesktopPortal
 from gnome_shell_windows import GnomeShellWindows
 from window_accessibility import AccessibleWindow, AccessibleWindowController
 from document_reader_ui import DocumentReaderUI
+from markdown_text_widget import MarkdownText
 
 
 IMAGE_DROP_HINT = "Drop a PNG, JPEG, or WebP image onto the message box to attach it."
@@ -1476,15 +1477,15 @@ class DesktopAgent:
             self.stop_speech_button.config(state=tk.NORMAL)
 
     def _display_reading_text(self, text: str) -> None:
-        """Display text being read from document in the transcript."""
+        """Display text being read from document in the transcript with Markdown formatting."""
         self.transcript.config(state=tk.NORMAL)
         
         # Clear previous content and any highlighting
         self.transcript.delete("1.0", tk.END)
         self.transcript.tag_remove("current_step", "1.0", tk.END)
         
-        # Insert the new text
-        self.transcript.insert(tk.END, text)
+        # Insert the new text with Markdown formatting
+        self.transcript.insert_markdown(text)
         
         # Note: Do NOT highlight the entire text here. Let the highlighting thread
         # handle highlighting as speech plays. This ensures proper synchronization.
@@ -1867,7 +1868,7 @@ class DesktopAgent:
         )
         self.document_reader_ui.pack(fill=tk.X, padx=0, pady=(4, 4))
 
-        self.transcript = scrolledtext.ScrolledText(
+        self.transcript = MarkdownText(
             self.root,
             wrap=tk.WORD,
             height=max(8, 24 - round(96 / tkfont.nametofont("TkFixedFont").metrics("linespace"))),
