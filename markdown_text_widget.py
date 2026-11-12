@@ -101,17 +101,19 @@ class MarkdownText(scrolledtext.ScrolledText):
                 header_text = header_match.group(2)
                 level = min(len(hashes), 3)
                 tag = f"header{level}"
-                start_pos = tk.END
+                start_index = self.index(tk.END)
                 self.insert(tk.END, header_text)
-                self.tag_add(tag, start_pos, tk.END)
+                end_index = self.index(tk.END)
+                self.tag_add(tag, start_index, end_index)
                 continue
             
             # Check for blockquotes (> Quote)
             if line.startswith('>'):
                 quote_text = line[1:].strip()
-                start_pos = tk.END
+                start_index = self.index(tk.END)
                 self.insert(tk.END, quote_text)
-                self.tag_add("blockquote", start_pos, tk.END)
+                end_index = self.index(tk.END)
+                self.tag_add("blockquote", start_index, end_index)
                 continue
             
             # Format inline Markdown in the line
@@ -130,9 +132,10 @@ class MarkdownText(scrolledtext.ScrolledText):
             bold_match = re.match(r'\*\*(.+?)\*\*', text[pos:])
             if bold_match:
                 content = bold_match.group(1)
-                start_pos = tk.END
+                start_index = self.index(tk.END)
                 self.insert(tk.END, content)
-                self.tag_add("bold", start_pos, tk.END)
+                end_index = self.index(tk.END)
+                self.tag_add("bold", start_index, end_index)
                 pos += len(bold_match.group(0))
                 continue
             
@@ -140,9 +143,10 @@ class MarkdownText(scrolledtext.ScrolledText):
             bold_match = re.match(r'__(.+?)__', text[pos:])
             if bold_match:
                 content = bold_match.group(1)
-                start_pos = tk.END
+                start_index = self.index(tk.END)
                 self.insert(tk.END, content)
-                self.tag_add("bold", start_pos, tk.END)
+                end_index = self.index(tk.END)
+                self.tag_add("bold", start_index, end_index)
                 pos += len(bold_match.group(0))
                 continue
             
@@ -150,9 +154,10 @@ class MarkdownText(scrolledtext.ScrolledText):
             code_match = re.match(r'`([^`]+?)`', text[pos:])
             if code_match:
                 content = code_match.group(1)
-                start_pos = tk.END
+                start_index = self.index(tk.END)
                 self.insert(tk.END, content)
-                self.tag_add("code", start_pos, tk.END)
+                end_index = self.index(tk.END)
+                self.tag_add("code", start_index, end_index)
                 pos += len(code_match.group(0))
                 continue
             
@@ -161,9 +166,10 @@ class MarkdownText(scrolledtext.ScrolledText):
             italic_match = re.match(r'\*(?!\*)([^\*]+?)\*(?!\*)', text[pos:])
             if italic_match:
                 content = italic_match.group(1)
-                start_pos = tk.END
+                start_index = self.index(tk.END)
                 self.insert(tk.END, content)
-                self.tag_add("italic", start_pos, tk.END)
+                end_index = self.index(tk.END)
+                self.tag_add("italic", start_index, end_index)
                 pos += len(italic_match.group(0))
                 continue
             
@@ -171,9 +177,10 @@ class MarkdownText(scrolledtext.ScrolledText):
             italic_match = re.match(r'_(?!_)([^_]+?)_(?!_)', text[pos:])
             if italic_match:
                 content = italic_match.group(1)
-                start_pos = tk.END
+                start_index = self.index(tk.END)
                 self.insert(tk.END, content)
-                self.tag_add("italic", start_pos, tk.END)
+                end_index = self.index(tk.END)
+                self.tag_add("italic", start_index, end_index)
                 pos += len(italic_match.group(0))
                 continue
             
