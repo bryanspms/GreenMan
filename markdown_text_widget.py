@@ -45,38 +45,46 @@ class MarkdownText(scrolledtext.ScrolledText):
         super().__init__(*args, **kwargs)
         
         # Get base font info
-        base_font_name = tkfont.nametofont(self.cget("font"))
-        base_size = base_font_name.actual("size")
+        try:
+            base_font = tkfont.nametofont(self.cget("font"))
+            font_family = base_font.actual("family")
+            font_size = base_font.actual("size")
+        except Exception as e:
+            print(f"Warning: Failed to get font info: {e}")
+            # Use defaults
+            font_family = "TkFixedFont"
+            font_size = 10
         
         # Configure Markdown tags
         self.tag_configure(
             "bold",
-            font=(base_font_name.actual("family"), base_size, "bold"),
+            font=(font_family, font_size, "bold"),
         )
         self.tag_configure(
             "italic",
-            font=(base_font_name.actual("family"), base_size, "italic"),
+            font=(font_family, font_size, "italic"),
         )
         self.tag_configure(
             "code",
             background="#f5f5f5",
             foreground="#d63384",
+            font=(font_family, font_size, "normal"),
         )
         self.tag_configure(
             "header1",
-            font=(base_font_name.actual("family"), base_size + 6, "bold"),
+            font=(font_family, font_size + 6, "bold"),
             foreground="#1a1a1a",
             spacing3=6,
         )
         self.tag_configure(
             "header2",
-            font=(base_font_name.actual("family"), base_size + 4, "bold"),
+            font=(font_family, font_size + 4, "bold"),
             foreground="#2c2c2c",
             spacing3=4,
         )
         self.tag_configure(
             "header3",
-            font=(base_font_name.actual("family"), base_size + 2, "bold"),
+            font=(font_family, font_size + 2, "bold"),
             foreground="#4a4a4a",
             spacing3=2,
         )
@@ -85,7 +93,7 @@ class MarkdownText(scrolledtext.ScrolledText):
             foreground="#666666",
             lmargin1=20,
             lmargin2=20,
-            font=(base_font_name.actual("family"), base_size, "italic"),
+            font=(font_family, font_size, "italic"),
         )
 
     def insert_markdown(self, text: str) -> None:
@@ -200,6 +208,10 @@ class MarkdownText(scrolledtext.ScrolledText):
             end_index = self.index(tk.END)
             self.tag_add(nearest_tag, start_index, end_index)
             
+            # Debug output
+            print(f"DEBUG: Applied tag '{nearest_tag}' from {start_index} to {end_index}: {repr(content)}", flush=True)
+            
             # Move position forward
             pos += nearest_match.start() + len(nearest_match.group(0))
+
 
