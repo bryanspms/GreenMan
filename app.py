@@ -399,10 +399,12 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 MAX_TOOL_ROUNDS = 14
 MODEL_OPTIONS = (
     "llama3.1:8b",
-    "qwen3-vl:4b-instruct",
     "qwen3-vl:8b-instruct",
-    "qwen3-vl:4b",
     "qwen3-vl:8b",
+    "qwen3-vl:4b-instruct",
+    "qwen3-vl:4b",
+    "qwen3.5:4b",
+    "qwen2.5-coder:7b",
 )
 QWEN_VL_MODELS = frozenset(
     {
@@ -410,6 +412,8 @@ QWEN_VL_MODELS = frozenset(
         "qwen3-vl:8b-instruct",
         "qwen3-vl:4b",
         "qwen3-vl:8b",
+        "qwen3.5:4b",
+        "qwen2.5-coder:7b",
     }
 )
 DEFAULT_MODEL = "llama3.1:8b"
@@ -1423,6 +1427,10 @@ class DesktopAgent:
                     # Do NOT clear the document reading event - the reading loop will continue with next chunk
                     # Only stop face speaking briefly between chunks
                     self.face.stop_speaking()
+                elif kind in ("pause", "resume") and event is self._document_reading_cancel_event:
+                    print(f"DEBUG: DOCUMENT READING {kind.upper()} EVENT!")
+                    self._speech_paused = kind == "pause"
+                    self.face.set_speech_paused(self._speech_paused)
                 else:
                     print(f"DEBUG: Non-document-reading event, skipping")
                 continue
