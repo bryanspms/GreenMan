@@ -1392,13 +1392,11 @@ class DesktopAgent:
         """Register a cancel_event from document reading and start face animations."""
         self._document_reading_cancel_event = cancel_event
         self._document_reading_event_id = id(cancel_event)
-        print(f"DEBUG: Registered document reading cancel_event: {self._document_reading_event_id}", flush=True)
         # Don't start speaking yet - wait for the SpeechPlayer's on_start callback
         # which will provide the real envelope data
 
     def _on_document_speech_actually_started(self, cancel_event: Event, envelope: Optional[list[float]], window_seconds: float) -> None:
         """Called when document reading audio actually starts (from SpeechPlayer.on_start)."""
-        print(f"DEBUG: _on_document_speech_actually_started called with envelope={bool(envelope)}, window={window_seconds}", flush=True)
         # Store the envelope info so the highlighting thread can use it for better timing
         self.document_reader_ui.current_envelope = envelope
         self.document_reader_ui.current_window_seconds = window_seconds
@@ -1406,15 +1404,12 @@ class DesktopAgent:
         self.document_reader_ui.speech_actually_started.set()
 
     def _poll_speech_events(self) -> None:
-        print(f"DEBUG: _poll_speech_events called, queue empty={self._speech_events.empty()}", flush=True)
         while not self._speech_events.empty():
             kind, event, payload = self._speech_events.get_nowait()
-            print(f"DEBUG: _poll_speech_events received: kind={kind}, event={id(event)}, doc_event={id(self._document_reading_cancel_event) if self._document_reading_cancel_event else 'None'}, speech_event={id(self._speech_event) if self._speech_event else 'None'}", flush=True)
             
             if event is not self._speech_event:
                 # Check if this is from document reading
                 if kind == "start" and event is self._document_reading_cancel_event:
-                    print(f"DEBUG: DOCUMENT READING START EVENT! Calling face.start_speaking with envelope", flush=True)
                     # Audio actually started for document reading - clear waiting state and start animations
                     self.face.set_waiting(False)
                     assert isinstance(payload, tuple)
@@ -1423,17 +1418,13 @@ class DesktopAgent:
                     if self.document_reader_ui.on_speech_actually_started:
                         self.document_reader_ui.on_speech_actually_started(event, payload[0], payload[1])
                 elif kind == "stop" and event is self._document_reading_cancel_event:
-                    print(f"DEBUG: DOCUMENT READING CHUNK COMPLETE (not stopping document reading yet)")
                     # Document reading audio for this chunk finished
                     # Do NOT clear the document reading event - the reading loop will continue with next chunk
                     # Only stop face speaking briefly between chunks
                     self.face.stop_speaking()
                 elif kind in ("pause", "resume") and event is self._document_reading_cancel_event:
-                    print(f"DEBUG: DOCUMENT READING {kind.upper()} EVENT!")
                     self._speech_paused = kind == "pause"
                     self.face.set_speech_paused(self._speech_paused)
-                else:
-                    print(f"DEBUG: Non-document-reading event, skipping")
                 continue
             if kind == "start" and not event.is_set():
                 assert isinstance(payload, tuple)
@@ -1498,10 +1489,6 @@ class DesktopAgent:
 
     def _highlight_word_in_transcript(self, word: str, start: int, end: int) -> None:
         """Highlight a specific word in the transcript as it's being spoken."""
-        # Show first 50 chars of word (may contain newlines)
-        word_preview = word[:50].replace('\n', '\\n') if word else ""
-        print(f"DEBUG: _highlight_word_in_transcript called with word_len={len(word)}, preview='{word_preview}', start={start}, end={end}", flush=True)
-        
         self.transcript.config(state=tk.NORMAL)
         
         # Remove all highlighting
@@ -1509,8 +1496,6 @@ class DesktopAgent:
         
         # Convert character positions to Tkinter line.column format
         full_text = self.transcript.get("1.0", tk.END)
-        
-        print(f"DEBUG: full_text length={len(full_text)}, word length={len(word)}", flush=True)
         
         # The transcript.get("1.0", tk.END) returns text with a trailing newline
         # Remove it for position calculation
@@ -1537,16 +1522,13 @@ class DesktopAgent:
         end_pos = char_pos_to_tkinter(actual_end)
         
         if start_pos is None or end_pos is None:
-            print(f"DEBUG: Position conversion failed (start={start}, end={end}), highlighting all text")
             self.transcript.tag_add("current_step", "1.0", tk.END)
         else:
-            print(f"DEBUG: Setting tag from {start_pos} to {end_pos}")
             # Apply highlighting
             try:
                 self.transcript.tag_add("current_step", start_pos, end_pos)
-            except tk.TclError as e:
+            except tk.TclError:
                 # If position is invalid, highlight all text
-                print(f"DEBUG: Position invalid ({e}), highlighting all text")
                 self.transcript.tag_add("current_step", "1.0", tk.END)
         
         self.transcript.config(state=tk.DISABLED)
@@ -2982,7 +2964,6 @@ class DesktopAgent:
         self.transcript.tag_remove("current_step", "1.0", tk.END)
 
     def _append(self, speaker: str, text: str) -> None:
-        print(f"DEBUG _append: speaker={repr(speaker)}, text={repr(text[:100])}", flush=True)
         self.transcript.config(state=tk.NORMAL)
         
         # Insert speaker label in plain text
