@@ -3,11 +3,52 @@
 import tempfile
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 # Add the current directory to the path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from document_reader import DocumentReader, DocumentFormat, ReadingSession, TextChunker
+
+
+def test_pdf_text_extraction():
+    """Extract text from a real PDF using the installed dependency."""
+    from PyPDF2 import PdfWriter
+    from PyPDF2.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    page = writer.pages[0]
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+    })
+    content = DecodedStreamObject()
+    content.set_data(b"BT /F1 12 Tf 10 100 Td (PDF reader works) Tj ET")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "document.pdf"
+        with path.open("wb") as file:
+            writer.write(file)
+        assert "PDF reader works" in DocumentReader.read_text(path)
+
+
+def test_missing_pdf_dependency_reports_current_interpreter():
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "document.pdf"
+        path.touch()
+        with patch.dict("sys.modules", {"PyPDF2": None}):
+            try:
+                DocumentReader.read_text(path)
+            except ImportError as error:
+                assert sys.executable in str(error)
+                assert "requirements.txt" in str(error)
+            else:
+                raise AssertionError("Expected an actionable missing dependency error")
 
 
 def test_text_file():
@@ -145,6 +186,8 @@ if __name__ == "__main__":
     print("Testing Document Reader...\n")
     
     try:
+        test_pdf_text_extraction()
+        test_missing_pdf_dependency_reports_current_interpreter()
         test_text_file()
         test_markdown_file()
         test_text_chunking()

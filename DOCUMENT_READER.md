@@ -193,24 +193,13 @@ Tests cover:
 
 ## Troubleshooting
 
-### "Install PyPDF2 for PDF support"
-```bash
-pip install PyPDF2
-```
+### Missing document-format dependency
 
-### "Install ebooklib for EPUB support"
-```bash
-pip install ebooklib
-```
+Install the requirements in the same virtual environment used to launch Green
+Man, then restart it:
 
-### "Install python-docx for DOCX support"
 ```bash
-pip install python-docx
-```
-
-### "Install odfpy for ODT support"
-```bash
-pip install odfpy
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 ### Document not showing chunks

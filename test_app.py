@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tkinter as tk
 import unittest
+from tkinter import ttk
 from threading import Event, Lock
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -26,7 +27,6 @@ from app import (
     OLLAMA_REQUEST_TIMEOUT_SECONDS,
     OLLAMA_IMAGE_TOOL_TIMEOUT_SECONDS,
     MAX_IMAGE_BYTES,
-    MODEL_OPTIONS,
     SYSTEM_PROMPT,
     DesktopAgent,
     TOOL_MODES,
@@ -42,10 +42,12 @@ from app import (
     is_text_tool_call,
     load_dropped_image,
     load_ollama_model,
+    list_ollama_models,
     current_step_index,
     local_ollama_url,
     split_request_steps,
     load_user_preferences,
+    load_speech_volume_preference,
     load_piper_voice_directory,
     list_piper_voice_models,
     ollama_model_capabilities,
@@ -110,9 +112,25 @@ class EyeLegendIntegrationTests(unittest.TestCase):
                 child for child in brand_title.winfo_children()
                 if isinstance(child, tk.Label) and child.cget("text") == "Eye Guide"
             )
+            volume_scale = next(
+                child for child in brand_title.winfo_children()
+                if isinstance(child, ttk.Scale)
+            )
             self.assertGreaterEqual(
                 link.winfo_rooty(), title.winfo_rooty() + title.winfo_height()
             )
+            self.assertGreaterEqual(
+                volume_scale.winfo_rooty(), link.winfo_rooty() + link.winfo_height()
+            )
+            self.assertEqual(agent.speech_volume, 100)
+            self.assertEqual(volume_scale.get(), 100)
+            self.assertEqual(agent.speech._speech_volume(), 100)
+            self.assertEqual(agent.speech_volume_label.cget("text"), "Speech volume: 100%")
+            volume_scale.set(0)
+            root.update()
+            self.assertEqual(agent.speech_volume, 0)
+            self.assertEqual(agent.speech._speech_volume(), 0)
+            self.assertEqual(load_speech_volume_preference(agent.preferences_file), 0)
             self.assertGreaterEqual(
                 brand_title.winfo_rootx(),
                 agent.face.canvas.winfo_rootx() + agent.face.canvas.winfo_width(),
@@ -505,6 +523,43 @@ class VoiceDirectoryUITests(unittest.TestCase):
 
 
 class ModelLoadingUITests(unittest.TestCase):
+    def test_installed_models_populate_and_select_in_the_dropdown(self) -> None:
+        try:
+            root = TkinterDnD.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+
+        def cleanup() -> None:
+            for callback in root.tk.splitlist(root.tk.call("after", "info")):
+                root.after_cancel(callback)
+            root.destroy()
+
+        self.addCleanup(cleanup)
+        with TemporaryDirectory() as folder, patch(
+            "app.preferences_path", return_value=Path(folder) / "preferences.json"
+        ), patch("app.piper_voice_directory", return_value=Path(folder)), patch(
+            "app.list_ollama_models", return_value=["custom:latest", "llama3.1:8b"]
+        ), patch.object(DesktopAgent, "_begin_model_load") as load:
+            agent = DesktopAgent(root)
+            root.after(400, root.quit)
+            root.mainloop()
+            self.assertEqual(
+                tuple(agent.model_selector.cget("values")),
+                ("custom:latest", "llama3.1:8b"),
+            )
+            agent._finish_ollama_model_list(
+                agent.url_entry.get(), agent.model_list_request_id, [], None
+            )
+            self.assertEqual(tuple(agent.model_selector.cget("values")), ())
+            self.assertIn("No installed Ollama models", agent.status.get())
+            agent._finish_ollama_model_list(
+                agent.url_entry.get(), agent.model_list_request_id,
+                ["custom:latest", "llama3.1:8b"], None,
+            )
+            agent.model_choice.set("custom:latest")
+            agent._on_model_selected()
+            load.assert_called_with("custom:latest")
+
     def test_controls_disable_while_loading_and_restore_on_success_or_failure(self) -> None:
         try:
             root = TkinterDnD.Tk()
@@ -617,6 +672,38 @@ class ModelLoadingUITests(unittest.TestCase):
 
 
 class WorkspacePathTests(unittest.TestCase):
+    def test_speech_volume_preferences_round_trip_and_default(self) -> None:
+        with TemporaryDirectory() as folder:
+            preferences = Path(folder) / "preferences.json"
+            self.assertEqual(load_speech_volume_preference(preferences), 100)
+            self.assertIsNone(
+                save_user_preferences(
+                    preferences, None, "Questions only", speech_volume=35
+                )
+            )
+            self.assertEqual(load_speech_volume_preference(preferences), 35)
+
+    def test_speech_volume_preference_clamps_or_rejects_invalid_values(self) -> None:
+        with TemporaryDirectory() as folder:
+            preferences = Path(folder) / "preferences.json"
+            for value, expected in ((-5, 0), (150, 100), ("quiet", 100), (True, 100)):
+                preferences.write_text(json.dumps({"speech_volume": value}))
+                with self.subTest(value=value):
+                    self.assertEqual(load_speech_volume_preference(preferences), expected)
+
+    def test_speech_volume_slider_saves_current_level(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.speech_volume_label = Mock()
+        agent._save_preferences = Mock()
+
+        agent._on_speech_volume_changed("42")
+
+        self.assertEqual(agent.speech_volume, 42)
+        agent.speech_volume_label.config.assert_called_once_with(
+            text="Speech volume: 42%"
+        )
+        agent._save_preferences.assert_called_once()
+
     def test_voice_directory_preferences_round_trip_and_default(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
@@ -813,6 +900,17 @@ class WorkspacePathTests(unittest.TestCase):
         self.assertEqual(system_prompt, SYSTEM_PROMPT)
         self.assertIsNone(error)
 
+    def test_preferences_preserve_custom_model_names(self) -> None:
+        with TemporaryDirectory() as folder:
+            preferences_file = Path(folder) / "preferences.json"
+            model = "example/custom-model:latest"
+            self.assertIsNone(
+                save_user_preferences(preferences_file, None, "Questions only", model)
+            )
+            self.assertEqual(load_user_preferences(preferences_file)[2], model)
+            with self.assertRaisesRegex(ValueError, "Model name"):
+                save_user_preferences(preferences_file, None, "Questions only", " ")
+
     def test_preferences_restore_voice_enabled(self) -> None:
         with TemporaryDirectory() as folder:
             root = Path(folder)
@@ -914,6 +1012,7 @@ class WorkspacePathTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             root = Path(folder)
             self.assertEqual(resolve_workspace_path(root, "notes.txt"), root / "notes.txt")
+            self.assertEqual(resolve_workspace_path(root, "."), root)
 
     def test_rejects_parent_traversal(self) -> None:
         with TemporaryDirectory() as folder:
@@ -924,6 +1023,8 @@ class WorkspacePathTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             with self.assertRaises(ValueError):
                 resolve_workspace_path(Path(folder), "/etc/passwd")
+            with self.assertRaises(ValueError):
+                resolve_workspace_path(Path(folder), "/")
 
     def test_rejects_symlink_escape(self) -> None:
         with TemporaryDirectory() as folder:
@@ -1313,18 +1414,59 @@ class ToolCallResponseTests(unittest.TestCase):
         )
         self.assertIn("Never target Green Man itself", desktop_prompt)
 
-    def test_model_selector_options_and_default(self) -> None:
-        self.assertEqual(
-            MODEL_OPTIONS,
-            (
-                "llama3.1:8b",
-                "qwen3-vl:4b-instruct",
-                "qwen3-vl:8b-instruct",
-                "qwen3-vl:4b",
-                "qwen3-vl:8b",
-            ),
-        )
+    def test_model_selector_default(self) -> None:
         self.assertEqual(DEFAULT_MODEL, "llama3.1:8b")
+
+    def test_list_models_uses_installed_model_api(self) -> None:
+        with patch("app.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = (
+                b'{"models":[{"name":"z:latest"},{"name":"a:4b"},'
+                b'{"name":"z:latest"}]}'
+            )
+            models = list_ollama_models("http://127.0.0.1:11434")
+        self.assertEqual(models, ["a:4b", "z:latest"])
+        self.assertEqual(
+            urlopen.call_args.args[0], "http://127.0.0.1:11434/api/tags"
+        )
+
+    def test_model_list_errors_are_reported(self) -> None:
+        for payload in (b"{}", b'{"models":[{}]}', b"not json"):
+            with self.subTest(payload=payload), patch("app.urlopen") as urlopen:
+                urlopen.return_value.__enter__.return_value.read.return_value = payload
+                with self.assertRaises(RuntimeError):
+                    list_ollama_models("http://127.0.0.1:11434")
+        with patch("app.urlopen", side_effect=URLError("Connection refused")):
+            with self.assertRaisesRegex(RuntimeError, "Could not list installed"):
+                list_ollama_models("http://127.0.0.1:11434")
+        with self.assertRaises(ValueError):
+            list_ollama_models("http://example.com")
+
+    def test_model_list_ignores_stale_results_and_reports_errors(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.model_list_request_id = 2
+        agent.url_entry = Mock()
+        agent.url_entry.get.return_value = "http://localhost:11434"
+        agent.model_selector = Mock()
+        agent.status = Mock()
+        agent.model_list_url = None
+
+        agent._finish_ollama_model_list(
+            "http://localhost:11434", 1, ["stale"], None
+        )
+        agent._finish_ollama_model_list(
+            "http://localhost:11435", 2, ["other"], None
+        )
+        agent.model_selector.config.assert_not_called()
+        agent._finish_ollama_model_list(
+            "http://localhost:11434", 2, ["custom:latest"], None
+        )
+        agent.model_selector.config.assert_called_once_with(values=["custom:latest"])
+        agent._finish_ollama_model_list(
+            "http://localhost:11434", 2, None, "connection refused"
+        )
+        agent.status.set.assert_called_once_with(
+            "Could not refresh the Ollama model list: connection refused"
+        )
 
     def test_image_tool_response_budget_allows_longer_tool_calls(self) -> None:
         self.assertEqual(IMAGE_TOOL_CALL_RESPONSE_TOKENS, 1024)
@@ -2991,6 +3133,67 @@ class ToolCallResponseTests(unittest.TestCase):
         self.assertIn("extended internal reasoning", completed[0][1])
         self.assertIn("4096 tokens", completed[0][1])
         self.assertIn("qwen3-vl:4b-instruct", completed[0][1])
+
+    def test_workspace_turn_corrects_blocked_root_path(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "inside.txt").write_text("inside", encoding="utf-8")
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.workspace = root
+            agent.messages = [
+                {"role": "system", "content": "System prompt."},
+                {"role": "user", "content": "What files are in your workspace folder?"},
+            ]
+            agent.root = Mock()
+            agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+            completed = []
+            agent._finish = lambda answer, error: completed.append((answer, error))
+            agent._track_step = Mock()
+            agent._chat = Mock(side_effect=[
+                {"message": {"role": "assistant", "tool_calls": [
+                    {"function": {"name": "list_files", "arguments": {"path": "/"}}}
+                ]}},
+                {"message": {"role": "assistant", "tool_calls": [
+                    {"function": {"name": "list_files", "arguments": {"path": "."}}}
+                ]}},
+                {"message": {"role": "assistant", "content": "inside.txt"}},
+            ])
+
+            agent._run_turn("http://localhost:11434", "llama3.1:8b", "Workspace files")
+
+            tool_messages = [
+                message for message in agent.messages if message.get("role") == "tool"
+            ]
+            self.assertEqual(len(tool_messages), 2)
+            self.assertIn("Action blocked: Path must stay", tool_messages[0]["content"])
+            self.assertIn("Use '.'", tool_messages[0]["content"])
+            self.assertEqual(json.loads(tool_messages[1]["content"]), ["inside.txt"])
+            self.assertIn("Use '.'", agent.messages[0]["content"])
+            self.assertEqual(completed, [("inside.txt", None)])
+
+    def test_workspace_turn_stops_repeated_outside_paths(self) -> None:
+        with TemporaryDirectory() as folder:
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.workspace = Path(folder)
+            agent.messages = [
+                {"role": "system", "content": "System prompt."},
+                {"role": "user", "content": "List the workspace."},
+            ]
+            agent.root = Mock()
+            agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+            completed = []
+            agent._finish = lambda answer, error: completed.append((answer, error))
+            agent._track_step = Mock()
+            agent._chat = Mock(return_value={
+                "message": {"role": "assistant", "tool_calls": [
+                    {"function": {"name": "list_files", "arguments": {"path": "/"}}}
+                ]}
+            })
+
+            agent._run_turn("http://localhost:11434", "llama3.1:8b", "Workspace files")
+
+            self.assertEqual(agent._chat.call_count, 2)
+            self.assertIn("Stopped repeating a blocked list_files", completed[0][0])
 
     def test_rejects_tool_calls_outside_selected_mode(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)

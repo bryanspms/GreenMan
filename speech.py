@@ -7,11 +7,14 @@ import math
 import re
 import signal
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
+from array import array
 from array import array
 from collections.abc import Callable
 from pathlib import Path
@@ -90,6 +93,7 @@ class SpeechPlayer:
         on_error: Callable[[str, Event], None] | None = None,
         on_pause: Callable[[Event], None] | None = None,
         on_resume: Callable[[Event], None] | None = None,
+        volume_provider: Callable[[], int] | None = None,
     ) -> None:
         self._voice_model_provider = voice_model_provider
         self._on_start = on_start
@@ -97,6 +101,7 @@ class SpeechPlayer:
         self._on_error = on_error
         self._on_pause = on_pause
         self._on_resume = on_resume
+        self._volume_provider = volume_provider or (lambda: 100)
         self.process: subprocess.Popen | None = None
         self.process_lock = Lock()
         self._playback_lock = Lock()
@@ -193,6 +198,7 @@ class SpeechPlayer:
             if executable.endswith("spd-say"):
                 self._speak_with_dispatcher(text, cancel_event)
                 return
+            arguments = [*arguments, "-a", str(self._speech_volume())]
             result = self._run_process(
                 [executable, *arguments],
                 cancel_event,
@@ -203,7 +209,7 @@ class SpeechPlayer:
                 self._notify_error(
                     f"Speech engine exited with status {result}.", cancel_event
                 )
-        except (OSError, RuntimeError) as error:
+        except (OSError, RuntimeError, wave.Error) as error:
             if not cancel_event.is_set():
                 self._notify_error(str(error), cancel_event)
         finally:
@@ -246,6 +252,105 @@ class SpeechPlayer:
     def _notify_error(self, message: str, cancel_event: Event) -> None:
         if self._on_error is not None:
             self._on_error(message, cancel_event)
+
+    def _speech_volume(self) -> int:
+        return max(0, min(100, self._volume_provider()))
+
+    def _play_piper_audio(
+        self,
+        command: list[str],
+        wav_path: Path,
+        cancel_event: Event,
+        on_started: Callable[[], None],
+    ) -> int | None:
+        if cancel_event.is_set():
+            return None
+        with wave.open(str(wav_path), "rb") as source:
+            if source.getsampwidth() != 2:
+                raise wave.Error("Volume control requires 16-bit PCM Piper audio.")
+            channels = source.getnchannels()
+            rate = source.getframerate()
+            data_size = source.getnframes() * channels * 2
+            header = struct.pack(
+                "<4sI4s4sIHHIIHH4sI",
+                b"RIFF", 36 + data_size, b"WAVE", b"fmt ", 16, 1,
+                channels, rate, rate * channels * 2, channels * 2, 16,
+                b"data", data_size,
+            )
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                bufsize=0,
+            )
+            with self.process_lock:
+                self.process = process
+                self._pausable = True
+                self._dispatcher = False
+                self._paused = False
+                if cancel_event.is_set():
+                    try:
+                        process.terminate()
+                    except ProcessLookupError:
+                        pass
+                else:
+                    on_started()
+            try:
+                stdin = process.stdin
+                assert stdin is not None
+                def write_all(data: bytes) -> None:
+                    remaining = memoryview(data)
+                    while remaining:
+                        written = stdin.write(remaining)
+                        if not written:
+                            raise BrokenPipeError("Audio player stopped accepting audio.")
+                        remaining = remaining[written:]
+
+                write_all(header)
+                next_chunk_time = time.monotonic() - 0.1
+                while not cancel_event.is_set():
+                    while not cancel_event.is_set():
+                        with self.process_lock:
+                            paused = self._paused
+                        if paused:
+                            next_chunk_time = time.monotonic() - 0.1
+                            cancel_event.wait(0.05)
+                            continue
+                        delay = next_chunk_time - time.monotonic()
+                        if delay <= 0:
+                            break
+                        cancel_event.wait(min(delay, 0.05))
+                    if cancel_event.is_set():
+                        break
+                    frames = source.readframes(1024)
+                    if not frames:
+                        break
+                    samples = array("h")
+                    samples.frombytes(frames)
+                    if sys.byteorder == "big":
+                        samples.byteswap()
+                    volume = self._speech_volume()
+                    if volume != 100:
+                        for index, sample in enumerate(samples):
+                            samples[index] = round(sample * volume / 100)
+                    if sys.byteorder == "big":
+                        samples.byteswap()
+                    write_all(samples.tobytes())
+                    next_chunk_time = max(
+                        next_chunk_time, time.monotonic() - 0.1
+                    ) + len(frames) / (rate * channels * 2)
+            finally:
+                try:
+                    if process.stdin is not None:
+                        process.stdin.close()
+                finally:
+                    process.wait()
+                    with self.process_lock:
+                        if self.process is process:
+                            self.process = None
+                            self._pausable = False
+                            self._paused = False
+            return process.returncode
 
     def _run_process(
         self,
@@ -299,7 +404,11 @@ class SpeechPlayer:
         if cancel_event.is_set():
             return
         process = subprocess.Popen(
-            [str(interpreter), str(Path(__file__).with_name("speech_dispatcher_helper.py"))],
+            [
+                str(interpreter),
+                str(Path(__file__).with_name("speech_dispatcher_helper.py")),
+                str(self._speech_volume()),
+            ],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
         )
         with self.process_lock:
@@ -395,10 +504,11 @@ class SpeechPlayer:
                 )
             except (OSError, ValueError, EOFError, wave.Error):
                 envelope, window_seconds = None, 0.04
-            result = self._run_process(
-                [player_executable, *player_arguments, temporary_path],
+            input_name = "pipe:0" if Path(player_executable).name == "ffplay" else "-"
+            result = self._play_piper_audio(
+                [player_executable, *player_arguments, input_name],
+                Path(temporary_path),
                 cancel_event,
-                discard_stdout=True,
                 on_started=lambda: self._notify_start(
                     envelope, window_seconds, cancel_event
                 ),

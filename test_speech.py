@@ -101,7 +101,7 @@ class SpeechPlayerTests(unittest.TestCase):
             player.speak("Hello there.", cancel_event)
 
         popen.assert_called_once_with(
-            ["/usr/bin/espeak-ng", "--stdin"],
+            ["/usr/bin/espeak-ng", "--stdin", "-a", "100"],
             stdin=subprocess.PIPE,
             stdout=None,
             text=True,
@@ -134,7 +134,11 @@ class SpeechPlayerTests(unittest.TestCase):
             player.speak("Hello there.", cancel_event)
 
         popen.assert_called_once_with(
-            ["/usr/bin/python3", str(Path(__file__).with_name("speech_dispatcher_helper.py"))],
+            [
+                "/usr/bin/python3",
+                str(Path(__file__).with_name("speech_dispatcher_helper.py")),
+                "100",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -144,6 +148,118 @@ class SpeechPlayerTests(unittest.TestCase):
         on_resume.assert_called_once_with(cancel_event)
         self.assertIsNone(player.process)
         self.assertIsNone(player.cancel_event)
+
+    def test_speech_volume_is_passed_to_espeak(self) -> None:
+        player = SpeechPlayer(lambda: None, volume_provider=lambda: 37)
+        event = Event()
+        with (
+            patch.object(
+                player, "speech_engine", return_value=("/usr/bin/espeak-ng", ["--stdin"])
+            ),
+            patch.object(player, "_run_process", return_value=0) as run_process,
+        ):
+            player.speak("Hello", event)
+
+        self.assertEqual(
+            run_process.call_args.args[0],
+            ["/usr/bin/espeak-ng", "--stdin", "-a", "37"],
+        )
+
+    def test_piper_volume_changes_while_audio_is_streamed(self) -> None:
+        with TemporaryDirectory() as folder:
+            source = Path(folder) / "source.wav"
+            with wave.open(str(source), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16000)
+                wav_file.writeframes(struct.pack("<h", 10000) * 2048)
+
+            volume = [100]
+            audio = bytearray()
+            pipe = Mock()
+
+            def write(data: bytes) -> int:
+                audio.extend(data)
+                if len(audio) == 44 + 2048:
+                    volume[0] = 0
+                return len(data)
+
+            pipe.write.side_effect = write
+            process = Mock(stdin=pipe, returncode=0)
+            player = SpeechPlayer(lambda: None, volume_provider=lambda: volume[0])
+            with patch("speech.subprocess.Popen", return_value=process):
+                result = player._play_piper_audio(
+                    ["player", "-"], source, Event(), Mock()
+                )
+            self.assertEqual(result, 0)
+            with wave.open(io.BytesIO(audio), "rb") as actual:
+                samples = struct.unpack("<2048h", actual.readframes(2048))
+            self.assertEqual(samples[:1024], (10000,) * 1024)
+            self.assertEqual(samples[1024:], (0,) * 1024)
+
+    def test_piper_player_backends_receive_stream_input(self) -> None:
+        cases = (
+            ("/usr/bin/pw-play", [], "-"),
+            ("/usr/bin/paplay", [], "-"),
+            ("/usr/bin/aplay", [], "-"),
+            ("/usr/bin/ffplay", ["-nodisp"], "pipe:0"),
+        )
+        for executable, initial_arguments, input_name in cases:
+            with self.subTest(player=executable):
+                player = SpeechPlayer(
+                    lambda: Path("voice.onnx"), volume_provider=lambda: 40
+                )
+                player.audio_player = Mock(
+                    return_value=(executable, initial_arguments)
+                )
+                player._run_process = Mock(return_value=0)
+                player._play_piper_audio = Mock(return_value=0)
+                with patch("speech.importlib.util.find_spec", return_value=object()):
+                    player.speak("Hello", Event())
+
+                playback_command = player._play_piper_audio.call_args.args[0]
+                self.assertEqual(
+                    playback_command, [executable, *initial_arguments, input_name]
+                )
+
+    def test_piper_stream_can_be_paused_and_stopped(self) -> None:
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "long.wav"
+            with wave.open(str(path), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16000)
+                wav_file.writeframes(b"\0\0" * 16000 * 10)
+            player = SpeechPlayer(lambda: None)
+            event = Event()
+            player.cancel_event = event
+            started = Event()
+            errors: list[Exception] = []
+
+            def playback() -> None:
+                try:
+                    player._play_piper_audio(
+                        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                        path, event, started.set,
+                    )
+                except BrokenPipeError as error:
+                    errors.append(error)
+
+            worker = threading.Thread(target=playback)
+            worker.start()
+            try:
+                self.assertTrue(started.wait(5))
+                self.assertTrue(player.set_paused(True, event))
+                self.assertTrue(player.set_paused(False, event))
+                self.assertTrue(player.set_paused(True, event))
+                player.stop()
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(event.is_set())
+                self.assertIsNone(player.process)
+            finally:
+                player.stop()
+                worker.join(5)
 
     def test_speech_response_uses_selected_piper_voice_and_cleans_audio_file(
         self,
@@ -166,15 +282,14 @@ class SpeechPlayerTests(unittest.TestCase):
                 on_started: object = None,
             ) -> int:
                 commands.append((command, input_text))
-                if input_text is None:
-                    self.assertTrue(Path(command[-1]).is_file())
                 return 0
 
             player._run_process = Mock(side_effect=run_process)
+            player._play_piper_audio = Mock(return_value=0)
             with patch("speech.importlib.util.find_spec", return_value=object()):
                 player.speak("A natural sounding reply.", cancel_event)
 
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 1)
         model_command, input_text = commands[0]
         self.assertEqual(
             model_command[:4],
@@ -183,10 +298,8 @@ class SpeechPlayerTests(unittest.TestCase):
         self.assertEqual(model_command[4], str(voice_model))
         self.assertEqual(model_command[5], "--output-file")
         self.assertEqual(input_text, "A natural sounding reply.")
-        self.assertEqual(
-            commands[1][0][:2], ["/usr/bin/aplay", commands[0][0][6]]
-        )
-        self.assertIsNone(commands[1][1])
+        self.assertEqual(player._play_piper_audio.call_args.args[0], ["/usr/bin/aplay", "-"])
+        self.assertEqual(player._play_piper_audio.call_args.args[1], Path(commands[0][0][6]))
         self.assertFalse(Path(commands[0][0][6]).exists())
         self.assertIsNone(player.cancel_event)
 

@@ -262,7 +262,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List entries in a directory under the chosen workspace folder.",
+            "description": (
+                "List entries in the chosen workspace folder or a directory inside it. "
+                "Use '.' for the workspace root and paths relative to it for subfolders; "
+                "'/' is the filesystem root, not the workspace."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -398,15 +402,6 @@ THEME_COLORS = {
 }
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 MAX_TOOL_ROUNDS = 14
-MODEL_OPTIONS = (
-    "llama3.1:8b",
-    "qwen3-vl:8b-instruct",
-    "qwen3-vl:8b",
-    "qwen3-vl:4b-instruct",
-    "qwen3-vl:4b",
-    "qwen3.5:4b",
-    "qwen2.5-coder:7b",
-)
 QWEN_VL_MODELS = frozenset(
     {
         "qwen3-vl:4b-instruct",
@@ -513,6 +508,13 @@ def tools_for_desktop_screenshot(
 def system_prompt_for_mode(system_prompt: str, mode: str) -> str:
     if mode == "Desktop control":
         return f"{system_prompt}\n\n{DESKTOP_CONTROL_INSTRUCTIONS}"
+    if mode == "Workspace files":
+        return (
+            f"{system_prompt}\n\n"
+            "Workspace file tool paths are relative to the selected workspace folder. "
+            "Use '.' to list the workspace root, not '/'. Use relative paths for "
+            "files and subfolders, and never access paths outside the workspace."
+        )
     return system_prompt
 
 
@@ -592,6 +594,34 @@ def local_ollama_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def list_ollama_models(configured_url: str) -> list[str]:
+    api_url = local_ollama_url(configured_url) + "/api/tags"
+    try:
+        with urlopen(api_url, timeout=OLLAMA_CAPABILITY_TIMEOUT_SECONDS) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        raise RuntimeError(
+            f"Ollama returned HTTP {error.code} while listing installed models."
+        ) from error
+    except URLError as error:
+        raise RuntimeError(
+            f"Could not list installed Ollama models at {api_url}: {error.reason}."
+        ) from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Ollama returned invalid JSON while listing models.") from error
+    if not isinstance(result, dict) or not isinstance(result.get("models"), list):
+        raise RuntimeError("Ollama returned an unexpected model list.")
+    names = []
+    for model in result["models"]:
+        if not isinstance(model, dict) or not isinstance(model.get("name"), str):
+            raise RuntimeError("Ollama returned an invalid model in its model list.")
+        name = model["name"].strip()
+        if not name:
+            raise RuntimeError("Ollama returned an empty model name.")
+        names.append(name)
+    return sorted(set(names), key=str.casefold)
+
+
 def load_ollama_model(configured_url: str, model: str) -> None:
     api_url = local_ollama_url(configured_url) + "/api/generate"
     payload = json.dumps(
@@ -656,11 +686,15 @@ def ollama_model_capabilities(configured_url: str, model: str) -> frozenset[str]
     return frozenset(capability.lower() for capability in capabilities)
 
 
+class WorkspacePathError(ValueError):
+    pass
+
+
 def resolve_workspace_path(root: Path, relative_path: str) -> Path:
     workspace = root.resolve()
     target = (workspace / relative_path).resolve()
     if not target.is_relative_to(workspace):
-        raise ValueError("Path must stay inside the selected workspace folder.")
+        raise WorkspacePathError("Path must stay inside the selected workspace folder.")
     return target
 
 
@@ -744,7 +778,7 @@ def load_user_preferences(
     if not isinstance(mode, str) or mode not in TOOL_MODES:
         mode = "Questions only"
     model = preferences.get("model", DEFAULT_MODEL)
-    if not isinstance(model, str) or model not in MODEL_OPTIONS:
+    if not isinstance(model, str) or not model.strip():
         model = DEFAULT_MODEL
     voice_enabled = preferences.get("voice_enabled", False)
     if not isinstance(voice_enabled, bool):
@@ -787,6 +821,21 @@ def load_animations_preference(path: Path) -> bool:
     return value if isinstance(value, bool) else True
 
 
+def load_speech_volume_preference(path: Path) -> int:
+    try:
+        preferences = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 100
+    value = (
+        preferences.get("speech_volume", 100)
+        if isinstance(preferences, dict)
+        else 100
+    )
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 100
+    return max(0, min(100, value))
+
+
 def load_piper_voice_directory(path: Path) -> tuple[Path, str | None]:
     try:
         preferences = json.loads(path.read_text(encoding="utf-8"))
@@ -815,11 +864,12 @@ def save_user_preferences(
     system_prompt: str = SYSTEM_PROMPT,
     animations_enabled: bool = True,
     piper_directory: Path | None = None,
+    speech_volume: int = 100,
 ) -> str | None:
     if mode not in TOOL_MODES:
         raise ValueError(f"Unknown assistant mode: {mode}")
-    if model not in MODEL_OPTIONS:
-        raise ValueError(f"Unknown model: {model}")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Model name must be nonempty text.")
     if not isinstance(voice_enabled, bool):
         raise ValueError("Voice setting must be a boolean.")
     if voice_model is not None and not isinstance(voice_model, Path):
@@ -828,6 +878,10 @@ def save_user_preferences(
         raise ValueError("Voice model folder must be a filesystem path.")
     if not isinstance(system_prompt, str):
         raise ValueError("System prompt must be text.")
+    if isinstance(speech_volume, bool) or not isinstance(speech_volume, int):
+        raise ValueError("Speech volume must be an integer.")
+    if not 0 <= speech_volume <= 100:
+        raise ValueError("Speech volume must be between 0 and 100.")
     if workspace is not None and not is_valid_workspace(workspace):
         workspace = None
     preferences = {
@@ -839,6 +893,7 @@ def save_user_preferences(
         "system_prompt": system_prompt,
         "animations_enabled": animations_enabled,
         "piper_voice_directory": str(piper_directory) if piper_directory is not None else None,
+        "speech_volume": speech_volume,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1325,6 +1380,7 @@ class DesktopAgent:
         self._speech_pause_pending = False
         self.speech = SpeechPlayer(
             lambda: self.voice_model_path,
+            volume_provider=lambda: self.speech_volume,
             on_start=lambda envelope, window, event: self._speech_events.put(
                 ("start", event, (envelope, window))
             ),
@@ -1350,6 +1406,8 @@ class DesktopAgent:
         self.model_capabilities: frozenset[str] | None = None
         self.capability_check_id = 0
         self.capability_check_pending = False
+        self.model_list_request_id = 0
+        self.model_list_url: str | None = None
         self.screenshot_source_size: tuple[int, int] | None = None
         self.screenshot_image_size: tuple[int, int] | None = None
         self.remember_desktop_approvals = False
@@ -1358,6 +1416,7 @@ class DesktopAgent:
         self.animations_enabled = tk.BooleanVar(
             value=load_animations_preference(self.preferences_file)
         )
+        self.speech_volume = load_speech_volume_preference(self.preferences_file)
         self.voice_choice = tk.StringVar(
             value=(
                 self.voice_model_path.name
@@ -1383,6 +1442,7 @@ class DesktopAgent:
             "<Motion>", "<ButtonPress>", "<KeyPress>", "<KeyRelease>", "<MouseWheel>"
         ):
             self.root.bind_all(event, self._on_user_activity, add="+")
+        self._refresh_ollama_models()
         self.root.after(200, self._begin_model_load, self.active_model)
 
     def _on_user_activity(self, _event: tk.Event) -> None:
@@ -1656,6 +1716,24 @@ class DesktopAgent:
         eye_guide_link.bind("<Button-1>", lambda _event: self._open_eye_guide())
         eye_guide_link.bind("<Return>", lambda _event: self._open_eye_guide())
         eye_guide_link.bind("<space>", lambda _event: self._open_eye_guide())
+        self.speech_volume_label = tk.Label(
+            brand_title,
+            text=f"Speech volume: {self.speech_volume}%",
+            font=("TkDefaultFont", 8),
+            fg=THEME_COLORS["muted_text"],
+            bg=brand_title.cget("bg"),
+        )
+        self.speech_volume_label.pack(anchor=tk.W, pady=(2, 0))
+        self.speech_volume_scale = ttk.Scale(
+            brand_title,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            length=140,
+            command=self._on_speech_volume_changed,
+        )
+        self.speech_volume_scale.set(self.speech_volume)
+        self.speech_volume_scale.pack(anchor=tk.W, fill=tk.X)
 
         settings = tk.Frame(brand_row)
         settings.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(12, 0))
@@ -1665,9 +1743,10 @@ class DesktopAgent:
         self.model_selector = ttk.Combobox(
             settings,
             textvariable=self.model_choice,
-            values=MODEL_OPTIONS,
+            values=(),
             state="readonly",
             width=18,
+            postcommand=self._refresh_ollama_models,
         )
         self.model_selector.grid(row=0, column=1, sticky=tk.EW, padx=6, pady=1)
         self.model_selector.bind("<<ComboboxSelected>>", self._on_model_selected)
@@ -2102,9 +2181,15 @@ class DesktopAgent:
             self.system_prompt,
             self.animations_enabled.get(),
             self.piper_voice_directory,
+            self.speech_volume,
         )
         if error:
             self.status.set(error)
+
+    def _on_speech_volume_changed(self, value: str) -> None:
+        self.speech_volume = round(float(value))
+        self.speech_volume_label.config(text=f"Speech volume: {self.speech_volume}%")
+        self._save_preferences()
 
     def _record_request(self, request: str) -> None:
         self.request_history.append((time.strftime("%Y-%m-%d %H:%M:%S"), request))
@@ -2220,6 +2305,7 @@ class DesktopAgent:
                 system_prompt,
                 self.animations_enabled.get(),
                 self.piper_voice_directory,
+                self.speech_volume,
             )
             if error:
                 self.status.set(error)
@@ -2654,6 +2740,52 @@ class DesktopAgent:
             return
         self._begin_model_load(model)
 
+    def _refresh_ollama_models(self) -> None:
+        configured_url = self.url_entry.get().strip()
+        self.model_list_request_id += 1
+        request_id = self.model_list_request_id
+        if configured_url != self.model_list_url:
+            self.model_selector.config(values=())
+        threading.Thread(
+            target=self._list_ollama_models_in_background,
+            args=(configured_url, request_id),
+            daemon=True,
+        ).start()
+
+    def _list_ollama_models_in_background(
+        self, configured_url: str, request_id: int
+    ) -> None:
+        try:
+            models = list_ollama_models(configured_url)
+            error = None
+        except (URLError, TimeoutError, ValueError, RuntimeError, OSError) as exception:
+            models = None
+            error = str(exception)
+        self.root.after(
+            0, self._finish_ollama_model_list, configured_url, request_id, models, error
+        )
+
+    def _finish_ollama_model_list(
+        self,
+        configured_url: str,
+        request_id: int,
+        models: list[str] | None,
+        error: str | None,
+    ) -> None:
+        if (
+            request_id != self.model_list_request_id
+            or configured_url != self.url_entry.get().strip()
+        ):
+            return
+        if error is not None:
+            self.status.set(f"Could not refresh the Ollama model list: {error}")
+            return
+        assert models is not None
+        self.model_list_url = configured_url
+        self.model_selector.config(values=models)
+        if not models:
+            self.status.set("No installed Ollama models found. Pull a model and reopen the list.")
+
     def _on_animations_toggled(self) -> None:
         self.face.set_animations(self.animations_enabled.get())
         if self.eye_legend_dialog is not None and self.eye_legend_dialog.winfo_exists():
@@ -2821,6 +2953,7 @@ class DesktopAgent:
 
     def _on_ollama_url_changed(self, _event: tk.Event | None = None) -> None:
         if not self.busy:
+            self._refresh_ollama_models()
             self._check_model_capabilities()
 
     def _check_model_capabilities(self) -> None:
@@ -3726,7 +3859,19 @@ class DesktopAgent:
                             )
                         else:
                             self._track_step(str(name), arguments)
-                            result, images = self._execute_tool(name, arguments)
+                            try:
+                                result, images = self._execute_tool(name, arguments)
+                            except WorkspacePathError as error:
+                                if name not in {
+                                    "list_files", "read_file", "view_image", "write_file"
+                                }:
+                                    raise
+                                result, images = (
+                                    f"Action blocked: {error} No file was accessed or "
+                                    "changed. Use '.' for the workspace root and "
+                                    "relative paths within the workspace.",
+                                    None,
+                                )
                         denied = result == "Action denied by the user."
                         if not denied and not result.startswith("Action blocked:"):
                             completed_tools.add(str(name))

@@ -254,6 +254,9 @@ downloading a Vosk model and placing its extracted folder at that path.
    - Workspace files
    - Run command
 
+   In **Workspace files** mode, file tool paths are relative to the selected
+   workspace; `.` means the workspace root. Paths outside it are blocked.
+
    On Wayland, **Screenshot** requests screen-capture access only; **Desktop
    control** also requests pointer and keyboard access.
 
@@ -304,6 +307,10 @@ downloading a Vosk model and placing its extracted folder at that path.
    field. The image may be outside the selected workspace; it is attached to
    your next message and can be removed before sending.
 3. Choose the Ollama model.
+   The dropdown lists models installed on the configured Ollama server, even
+   if they are not currently loaded into memory. It refreshes at startup, when
+   opened, and when the API URL changes. Newly installed models may take a moment
+   to appear; reopen the list if necessary.
    Green Man checks the model capabilities reported by Ollama. It disables
    **Screenshot** and **Desktop control** when Ollama reports that vision or
    tool-calling support is missing. **view_image** is omitted from **Workspace
@@ -322,6 +329,9 @@ face. Green Man loads the selected model when it starts and whenever you change
 it, shows "Loading ..." in the status line, and says "Ready" when it is loaded
 (only if **Read responses aloud** is on). Controls are disabled while a model
 loads.
+If the model list cannot be retrieved, the status line reports the error and the
+current selection is retained. The list is not a request to download models;
+install them separately with Ollama.
 
 The bottom of the window shows CPU temperature and utilization and GPU
 utilization when available, updating continuously. Elapsed time counts
@@ -409,6 +419,11 @@ Select **Eye Guide** below the title beside Green Man to open a small window
 showing examples of these states, along with idle and speaking eyes. Its
 examples stop moving when animations are turned off. Close the guide with its
 **Close** button or Escape before returning to the main window.
+Adjust **Speech volume** with the slider below **Eye Guide**; this setting changes
+spoken responses without changing the computer's system volume.
+It defaults to 100% and remembers the last selected level.
+For Piper, adjustments also affect speech already playing. System voice engines
+apply the setting when the next speech segment starts.
 
 Untick **Green Man Animations** (beside **Read responses aloud**) to keep the face
 still and neutral: no blinking, nose twitching, glancing, sleep animation, lip

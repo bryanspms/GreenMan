@@ -24,6 +24,8 @@ def main() -> int:
     try:
         text = sys.stdin.read()
         client = speechd.SSIPClient("greenman")
+        volume = int(sys.argv[1]) if len(sys.argv) > 1 else 100
+        client.set_volume(volume - 100)
 
         def notify(event: str, **_kwargs: object) -> None:
             if event in ("begin", "pause", "resume"):

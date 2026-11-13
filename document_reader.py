@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
+import sys
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+
+def _missing_dependency_message(package: str, format_name: str) -> str:
+    requirements = Path(__file__).with_name("requirements.txt")
+    command = (
+        f"{shlex.quote(sys.executable)} -m pip install -r "
+        f"{shlex.quote(str(requirements))}"
+    )
+    return f"{package} is required for {format_name} support. Install it with:\n{command}"
 
 
 class DocumentFormat(Enum):
@@ -91,11 +102,10 @@ class DocumentReader:
         """Read PDF file using PyPDF2."""
         try:
             import PyPDF2
-        except ImportError:
-            raise ImportError(
-                "PyPDF2 is required for PDF support. "
-                "Install it with: pip install PyPDF2"
-            )
+        except ModuleNotFoundError as error:
+            if error.name != "PyPDF2":
+                raise
+            raise ImportError(_missing_dependency_message("PyPDF2", "PDF")) from error
         
         text = []
         with open(file_path, "rb") as pdf_file:
@@ -111,11 +121,10 @@ class DocumentReader:
         try:
             import ebooklib
             from ebooklib import epub
-        except ImportError:
-            raise ImportError(
-                "ebooklib is required for EPUB support. "
-                "Install it with: pip install ebooklib"
-            )
+        except ModuleNotFoundError as error:
+            if error.name != "ebooklib":
+                raise
+            raise ImportError(_missing_dependency_message("ebooklib", "EPUB")) from error
         
         text = []
         try:
@@ -144,11 +153,10 @@ class DocumentReader:
         """Read DOCX (Word) file."""
         try:
             from docx import Document
-        except ImportError:
-            raise ImportError(
-                "python-docx is required for DOCX support. "
-                "Install it with: pip install python-docx"
-            )
+        except ModuleNotFoundError as error:
+            if error.name != "docx":
+                raise
+            raise ImportError(_missing_dependency_message("python-docx", "DOCX")) from error
         
         doc = Document(file_path)
         text = []
@@ -185,11 +193,10 @@ class DocumentReader:
         try:
             from odf import text
             from odf.opendocument import load
-        except ImportError:
-            raise ImportError(
-                "odfpy is required for ODT support. "
-                "Install it with: pip install odfpy"
-            )
+        except ModuleNotFoundError as error:
+            if error.name != "odf":
+                raise
+            raise ImportError(_missing_dependency_message("odfpy", "ODT")) from error
         
         doc = load(str(file_path))
         text_content = []

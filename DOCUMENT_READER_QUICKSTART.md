@@ -4,7 +4,7 @@
 
 1. **Install dependencies** (if not already installed):
 ```bash
-pip install PyPDF2 ebooklib python-docx odfpy
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 2. **Update Green Man**:
@@ -127,11 +127,8 @@ Experiment with different chunking strategies:
 A: Speed is controlled by your TTS engine settings in Green Man's preferences.
 
 **Q: What if my document won't open?**
-A: Make sure you have the required package for that format installed:
-- PDF: `pip install PyPDF2`
-- EPUB: `pip install ebooklib`
-- Word: `pip install python-docx`
-- ODT: `pip install odfpy`
+A: Install the requirements in Green Man's environment with
+`.venv/bin/python -m pip install -r requirements.txt`, then restart the app.
 
 **Q: Where are my reading positions saved?**
 A: In `~/.greenman/reading_sessions/` as JSON files. You can delete them to start fresh.
@@ -166,8 +163,8 @@ See Green Man's voice settings to select your preferred voice and engine.
 - Try selecting a different chunking strategy
 
 ### "Install X library" error
-- Install the missing package as suggested
-- Example: `pip install PyPDF2`
+- Run the installation command shown in the error; it uses the Python
+  interpreter running Green Man. Restart the app afterward.
 
 ### Session not resuming
 - Check if `~/.greenman/reading_sessions/` directory exists
