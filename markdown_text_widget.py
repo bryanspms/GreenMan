@@ -203,9 +203,16 @@ class MarkdownText(scrolledtext.ScrolledText):
             
             # Insert the matched content with tag
             content = nearest_match.group(1)
+            
+            # Get the position AFTER inserting the content
             start_index = self.index(tk.END)
+            print(f"DEBUG: Before insert, tk.END={start_index}, content={repr(content)}", flush=True)
+            
             self.insert(tk.END, content)
+            
             end_index = self.index(tk.END)
+            print(f"DEBUG: After insert, tk.END={end_index}", flush=True)
+            
             self.tag_add(nearest_tag, start_index, end_index)
             
             # Debug output
@@ -213,5 +220,6 @@ class MarkdownText(scrolledtext.ScrolledText):
             
             # Move position forward
             pos += nearest_match.start() + len(nearest_match.group(0))
+
 
 
