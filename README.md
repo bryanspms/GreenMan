@@ -15,6 +15,7 @@
 - [GNOME Wayland Window Control (optional)](#gnome-wayland-window-control-optional)
 - [Microphone Dictation](#microphone-dictation)
 - [Usage](#usage)
+  - [Response Formatting with Markdown](#response-formatting-with-markdown)
   - [Animated face](#animated-face)
   - [Performance](#performance)
 - [Project Layout](#project-layout)
@@ -34,7 +35,9 @@
 - Workspace-scoped file tools, plus user-selected image attachments
 - Read, write, and inspect files within a chosen folder
 - Run shell commands with explicit approval
-- Optional spoken assistant responses
+- Optional spoken assistant responses with Markdown formatting support
+- Markdown-formatted response text with bold, italic, code, headings, and blockquotes
+- Collapsible Document Reader section for efficient screen space management
 - Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows, with status cues for loading, waiting, and recording (can be turned off)
 - Optional spoken "Ready" after the Ollama model loads, including at startup
 - Current-step highlighting for multi-line Desktop control requests
@@ -351,6 +354,31 @@ While a response is playing, use the green **Pause** button beside **Stop
 speaking** to pause, then **Play** to resume. Speech Dispatcher may finish the
 current sentence before pausing and requires the system `python3-speechd`
 package. Green Man controls only its own Speech Dispatcher connection.
+
+### <span style="color: #2f6b3f;">Response Formatting with Markdown</span>
+
+Chat responses support **Markdown formatting** for better readability. The response text area renders the following Markdown syntax:
+
+| Format | Syntax | Example |
+|--------|--------|---------|
+| **Bold** | `**text**` or `__text__` | **This is bold** |
+| *Italic* | `*text*` or `_text_` | *This is italic* |
+| `Code` | `` `text` `` | `code snippet` |
+| Heading 1 | `# Heading` | # Large heading |
+| Heading 2 | `## Heading` | ## Medium heading |
+| Heading 3 | `### Heading` | ### Small heading |
+| Blockquote | `> text` | > Quoted text |
+
+**Styling Details:**
+- Bold text uses a bold font weight
+- Italic text uses an italic font style
+- Code snippets display with a light gray background and purple text
+- Headings scale in size from Heading 1 (largest) to Heading 3 (smallest)
+- Blockquotes display in italic, light gray text
+
+When responses are **read aloud**, Markdown formatting syntax is automatically stripped to produce clean, natural speech without reading special characters. The formatted display is preserved in the response text area while the voice hears only the plain content.
+
+You can also **collapse the Document Reader** section to save screen space by clicking the collapse button (▼) in the Document Reader header. The collapse state is remembered between sessions.
 
 ### <span style="color: #2f6b3f;">Animated face</span>
 
