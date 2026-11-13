@@ -311,6 +311,8 @@ downloading a Vosk model and placing its extracted folder at that path.
 
    In **Workspace files** mode, file tool paths are relative to the selected
    workspace; `.` means the workspace root. Paths outside it are blocked.
+   If the model tries to read or write a directory as a file, Green Man reports
+   the mistake to the model so it can list the directory or choose a file.
 
    On Wayland, **Screenshot** requests screen-capture access only; **Desktop
    control** also requests pointer and keyboard access.

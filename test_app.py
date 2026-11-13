@@ -3272,6 +3272,122 @@ class ToolCallResponseTests(unittest.TestCase):
             self.assertIn("Use '.'", agent.messages[0]["content"])
             self.assertEqual(completed, [("inside.txt", None)])
 
+    def test_workspace_turn_corrects_attempt_to_read_a_directory(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "inside.py").write_text("print('hello')", encoding="utf-8")
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.workspace = root
+            agent.messages = [
+                {"role": "system", "content": "System prompt."},
+                {"role": "user", "content": "Can you analyze code in this workspace?"},
+            ]
+            agent.root = Mock()
+            agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+            completed = []
+            agent._finish = lambda answer, error: completed.append((answer, error))
+            agent._track_step = Mock()
+            agent._chat = Mock(side_effect=[
+                {"message": {"role": "assistant", "tool_calls": [
+                    {"function": {"name": "read_file", "arguments": {"path": "."}}}
+                ]}},
+                {"message": {"role": "assistant", "tool_calls": [
+                    {"function": {"name": "list_files", "arguments": {"path": "."}}}
+                ]}},
+                {"message": {"role": "assistant", "content": "Yes, I can analyze code."}},
+            ])
+
+            agent._run_turn("http://localhost:11434", "llama3.1:8b", "Workspace files")
+
+            tool_messages = [
+                message for message in agent.messages if message.get("role") == "tool"
+            ]
+            self.assertEqual(len(tool_messages), 2)
+            self.assertIn("Action blocked:", tool_messages[0]["content"])
+            self.assertIn("directory", tool_messages[0]["content"])
+            self.assertIn("list_files", tool_messages[0]["content"])
+            self.assertEqual(json.loads(tool_messages[1]["content"]), ["inside.py"])
+            self.assertEqual(completed, [("Yes, I can analyze code.", None)])
+
+    def test_workspace_write_directory_is_blocked_before_approval(self) -> None:
+        with TemporaryDirectory() as folder:
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.workspace = Path(folder)
+            (agent.workspace / "subfolder").mkdir()
+            agent._request_approval = Mock()
+            for path in (".", "subfolder", str(agent.workspace)):
+                with self.subTest(path=path):
+                    result, images = agent._execute_tool(
+                        "write_file", {"path": path, "content": "not a file"}
+                    )
+                    self.assertIn("Action blocked:", result)
+                    self.assertIn("directory", result)
+                    self.assertIsNone(images)
+            agent._request_approval.assert_not_called()
+
+    def test_workspace_reads_and_writes_files_with_approval(self) -> None:
+        with TemporaryDirectory() as folder:
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.workspace = Path(folder)
+            (agent.workspace / "subfolder").mkdir()
+            agent._request_approval = Mock(return_value=True)
+
+            agent._execute_tool(
+                "write_file", {"path": "subfolder/example.py", "content": "print('hello')"}
+            )
+            agent._request_approval.assert_called_once()
+            result, images = agent._execute_tool(
+                "read_file", {"path": "subfolder/example.py"}
+            )
+            self.assertEqual(result, "print('hello')")
+            self.assertIsNone(images)
+            result, images = agent._execute_tool("read_file", {"path": "subfolder"})
+            self.assertIn("Action blocked:", result)
+            self.assertIn("list_files", result)
+            self.assertIsNone(images)
+
+    def test_workspace_write_handles_directory_created_during_approval(self) -> None:
+        with TemporaryDirectory() as folder:
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.workspace = Path(folder)
+
+            def approve_after_directory_created(_name, _args):
+                (agent.workspace / "new.py").mkdir()
+                return True
+
+            agent._request_approval = Mock(side_effect=approve_after_directory_created)
+            result, images = agent._execute_tool(
+                "write_file", {"path": "new.py", "content": "print('hello')"}
+            )
+            self.assertIn("Action blocked:", result)
+            self.assertIn("directory", result)
+            self.assertIsNone(images)
+            self.assertTrue((agent.workspace / "new.py").is_dir())
+
+    def test_workspace_turn_stops_repeated_directory_read(self) -> None:
+        with TemporaryDirectory() as folder:
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.workspace = Path(folder)
+            agent.messages = [
+                {"role": "system", "content": "System prompt."},
+                {"role": "user", "content": "Can you analyze the workspace?"},
+            ]
+            agent.root = Mock()
+            agent.root.after.side_effect = lambda _delay, callback, *args: callback(*args)
+            completed = []
+            agent._finish = lambda answer, error: completed.append((answer, error))
+            agent._track_step = Mock()
+            agent._chat = Mock(return_value={
+                "message": {"role": "assistant", "tool_calls": [
+                    {"function": {"name": "read_file", "arguments": {"path": "."}}}
+                ]}
+            })
+
+            agent._run_turn("http://localhost:11434", "llama3.1:8b", "Workspace files")
+
+            self.assertEqual(agent._chat.call_count, 2)
+            self.assertIn("Stopped repeating a blocked read_file", completed[0][0])
+
     def test_workspace_turn_stops_repeated_outside_paths(self) -> None:
         with TemporaryDirectory() as folder:
             agent = DesktopAgent.__new__(DesktopAgent)

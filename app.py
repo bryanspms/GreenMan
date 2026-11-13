@@ -278,7 +278,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a UTF-8 text file under the chosen workspace folder (up to 1 MB).",
+            "description": (
+                "Read a UTF-8 text file under the chosen workspace folder (up to 1 MB). "
+                "For a directory, use list_files instead."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -513,7 +516,9 @@ def system_prompt_for_mode(system_prompt: str, mode: str) -> str:
             f"{system_prompt}\n\n"
             "Workspace file tool paths are relative to the selected workspace folder. "
             "Use '.' to list the workspace root, not '/'. Use relative paths for "
-            "files and subfolders, and never access paths outside the workspace."
+            "files and subfolders, and never access paths outside the workspace. "
+            "Use list_files for directories; read_file and write_file require file "
+            "paths. Answer capability questions directly when no file access is needed."
         )
     return system_prompt
 
@@ -4521,6 +4526,12 @@ class DesktopAgent:
             if self.workspace is None:
                 raise ValueError("Choose a workspace folder before using file tools.")
             target = resolve_workspace_path(self.workspace, str(args["path"]))
+            if target.is_dir():
+                return (
+                    "Action blocked: the requested path is a directory, not a file. "
+                    "Use list_files to inspect it or choose a file path for write_file.",
+                    None,
+                )
             if not target.parent.is_dir():
                 raise ValueError("The parent directory must already exist.")
             approval_args = {**args, "resolved_path": str(target)}
@@ -4762,7 +4773,14 @@ class DesktopAgent:
                 return json.dumps(sorted(entry.name for entry in target.iterdir())), None
 
             if name == "read_file":
-                content = target.read_bytes()
+                try:
+                    content = target.read_bytes()
+                except IsADirectoryError:
+                    return (
+                        "Action blocked: the requested path is a directory, not a file. "
+                        "Use list_files to inspect it, then read_file for a file inside it.",
+                        None,
+                    )
                 if len(content) > MAX_FILE_BYTES:
                     raise ValueError("File exceeds the 1 MB read limit.")
                 return content.decode("utf-8"), None
@@ -4785,7 +4803,14 @@ class DesktopAgent:
                 )
 
             content = str(args["content"])
-            target.write_text(content, encoding="utf-8")
+            try:
+                target.write_text(content, encoding="utf-8")
+            except IsADirectoryError:
+                return (
+                    "Action blocked: the requested path is a directory, not a file. "
+                    "Use list_files to inspect it or choose a file path for write_file.",
+                    None,
+                )
             return f"Wrote {len(content)} characters to {target.name}.", None
 
         if name == "run_command":
