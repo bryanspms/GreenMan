@@ -31,6 +31,13 @@ WAITING_SWEEP = 4.5
 WAITING_SWEEP_TICKS = 12
 BLINK_LID_LEVELS = (0.55, 1.0, 1.0, 0.55)
 NOSE_TWITCH_OFFSETS = (0.5, 1.0, 0.5, 0.0, -0.5, -1.0, -0.5, 0.0)
+VISITOR_MIN_DELAY_MS = 60_000
+VISITOR_MAX_DELAY_MS = 300_000
+VISITOR_FRAME_MS = 50
+VISITOR_FLIGHT_SECONDS = 5.0
+VISITOR_LOOP_CHANCE = 0.25
+VISITOR_TAG = "flying_visitor"
+VISITOR_TYPES = ("bee", "moth", "butterfly")
 
 
 class EyeLegend:
@@ -134,6 +141,7 @@ class GreenManFace:
             highlightthickness=0,
             bg=background,
         )
+        self.canvas.bind("<Destroy>", self._on_canvas_destroy, add="+")
         self.speaking = False
         self.waiting = False
         self.loading = False
@@ -150,6 +158,8 @@ class GreenManFace:
         self._mouth_pause_started: float | None = None
         self._mouth_paused_seconds = 0.0
         self._eye_after: str | None = None
+        self._visitor_after: str | None = None
+        self._visitor_choices: list[str] = []
         self._nose_twitch_frame = len(NOSE_TWITCH_OFFSETS)
         self._pupils: list[tuple[int, float, float]] = []
         self._brows: list[tuple[int, float, float]] = []
@@ -163,7 +173,108 @@ class GreenManFace:
             for _ in range(3)
         ]
         self.canvas.scale("all", 0, 0, FACE_SCALE, FACE_SCALE)
+        self._schedule_visitor()
         self._start_eye_animation()
+
+    def _schedule_visitor(self) -> None:
+        if self.animations_enabled and self._visitor_after is None:
+            delay = round(random.uniform(VISITOR_MIN_DELAY_MS, VISITOR_MAX_DELAY_MS))
+            self._visitor_after = self.root.after(delay, self._start_visitor)
+
+    def _start_visitor(self) -> None:
+        self._visitor_after = None
+        if not self.animations_enabled:
+            return
+        if not self._visitor_choices:
+            self._visitor_choices = list(VISITOR_TYPES)
+            random.shuffle(self._visitor_choices)
+        visitor = self._visitor_choices.pop()
+        direction = random.choice((-1, 1))
+        height = random.uniform(35.0, 95.0)
+        loop = random.random() < VISITOR_LOOP_CHANCE
+        started = time.monotonic()
+        wing_colors = {
+            "bee": ("#f6e5bb", "#f6e5bb"),
+            "moth": ("#d7d4be", "#d7d4be"),
+            "butterfly": ("#f080d0", "#69a9f5"),
+        }[visitor]
+        body_color = {
+            "bee": "#e7b733",
+            "moth": "#8a7f6a",
+            "butterfly": "#53315f",
+        }[visitor]
+        wing_a = self.canvas.create_oval(
+            0, 0, 0, 0, fill=wing_colors[0], outline="", tags=VISITOR_TAG
+        )
+        wing_b = self.canvas.create_oval(
+            0, 0, 0, 0, fill=wing_colors[1], outline="", tags=VISITOR_TAG
+        )
+        body = self.canvas.create_oval(
+            0, 0, 0, 0, fill=body_color, outline=self.colors["text"], tags=VISITOR_TAG
+        )
+        stripe = self.canvas.create_line(
+            0, 0, 0, 0, fill=self.colors["text"], width=2, tags=VISITOR_TAG
+        )
+        spots = (
+            tuple(
+                self.canvas.create_oval(
+                    0, 0, 0, 0, fill="#ffe76b", outline="", tags=VISITOR_TAG
+                )
+                for _ in range(2)
+            )
+            if visitor == "butterfly" else ()
+        )
+        self.canvas.tag_raise(VISITOR_TAG)
+
+        def tick() -> None:
+            self._visitor_after = None
+            if not self.animations_enabled:
+                self.canvas.delete(VISITOR_TAG)
+                return
+            elapsed = time.monotonic() - started
+            if elapsed >= VISITOR_FLIGHT_SECONDS:
+                self.canvas.delete(VISITOR_TAG)
+                self._schedule_visitor()
+                return
+            progress = max(0.0, elapsed / VISITOR_FLIGHT_SECONDS)
+            if loop:
+                # Pause forward travel midway while completing a closed circle.
+                travel = min(progress, 0.35) / 0.7 + max(progress - 0.65, 0.0) / 0.7
+            else:
+                travel = progress
+            x = -8.0 + (FACE_WIDTH + 16.0) * (
+                travel if direction > 0 else 1.0 - travel
+            )
+            y = height + 6.0 * math.sin(travel * math.tau * 2)
+            if loop and 0.35 <= progress <= 0.65:
+                angle = (progress - 0.35) / 0.3 * math.tau
+                x += direction * 12.0 * math.sin(angle)
+                y -= 12.0 * (1.0 - math.cos(angle))
+            wing_height = 2.5 + 2.5 * abs(math.sin(elapsed * 24))
+
+            def place(item: int, *coordinates: float) -> None:
+                self.canvas.coords(item, *(value * FACE_SCALE for value in coordinates))
+
+            if visitor == "butterfly":
+                place(wing_a, x - 7, y - wing_height - 2, x, y + 3)
+                place(wing_b, x, y - wing_height - 2, x + 7, y + 3)
+                place(spots[0], x - 5, y - wing_height / 2, x - 3, y - wing_height / 2 + 2)
+                place(spots[1], x + 3, y - wing_height / 2, x + 5, y - wing_height / 2 + 2)
+                place(body, x - 1.5, y - 4, x + 1.5, y + 4)
+                place(stripe, x - 3, y - 7, x, y - 4, x + 3, y - 7)
+            else:
+                place(wing_a, x - 5, y - wing_height - 2, x, y + 1)
+                place(wing_b, x, y - wing_height - 2, x + 5, y + 1)
+                place(body, x - 4, y - 2, x + 4, y + 2)
+                place(stripe, x, y - 2, x, y + 2)
+            self._visitor_after = self.root.after(VISITOR_FRAME_MS, tick)
+
+        tick()
+
+    def _on_canvas_destroy(self, event: tk.Event) -> None:
+        if event.widget is self.canvas and self._visitor_after is not None:
+            self.root.after_cancel(self._visitor_after)
+            self._visitor_after = None
 
     def start_speaking(
         self, envelope: list[float] | None, window_seconds: float = 0.04
@@ -248,12 +359,19 @@ class GreenManFace:
             self.note_activity()
         self.animations_enabled = enabled
         if not enabled:
+            if hasattr(self, "_visitor_after"):
+                if self._visitor_after is not None:
+                    self.root.after_cancel(self._visitor_after)
+                    self._visitor_after = None
+                self.canvas.delete(VISITOR_TAG)
             self.stop_speaking()
             self._set_lids(0.0)
             self._set_nose(0.0)
             self._nose_twitch_frame = len(NOSE_TWITCH_OFFSETS)
             for pupil, eye_x, eye_y in self._pupils:
                 self._coords(pupil, eye_x - 2.5, eye_y - 3, eye_x + 2.5, eye_y + 3)
+        elif hasattr(self, "_visitor_after"):
+            self._schedule_visitor()
         self._refresh_eye_color()
 
     def _refresh_eye_color(self) -> None:

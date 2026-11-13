@@ -1,3 +1,4 @@
+import random
 import tkinter as tk
 import unittest
 from unittest.mock import Mock, patch
@@ -16,6 +17,8 @@ from face import (
     SLEEP_IDLE_SECONDS,
     SLEEP_YAWN_SECONDS,
     WAITING_EYE_COLOR,
+    VISITOR_FLIGHT_SECONDS,
+    VISITOR_TAG,
     EyeLegend,
     GreenManFace,
 )
@@ -26,6 +29,223 @@ COLORS = {
     "green": "#2f6b3f",
     "green_selected": "#c8dfca",
 }
+
+
+class FlyingVisitorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+        self.addCleanup(self.root.destroy)
+        self.face = GreenManFace(self.root, self.root, COLORS, COLORS["background"])
+        self.addCleanup(
+            lambda: self.root.after_cancel(self.face._eye_after)
+            if self.face._eye_after is not None else None
+        )
+
+    def test_visitor_crosses_face_without_changing_states(self) -> None:
+        face = self.face
+        face.root.after_cancel(face._visitor_after)
+        face._visitor_after = None
+        face._visitor_choices = ["bee"]
+        with patch("face.time.monotonic", return_value=0.0) as now, patch(
+            "face.random.choice", return_value=1
+        ), patch("face.random.uniform", return_value=60.0), patch.object(
+            face.root, "after", return_value="visitor-timer"
+        ) as after:
+            face.waiting = face.loading = face.recording = face.speaking = True
+            face.sleeping = True
+            previous_activity = face._last_activity
+            face._start_visitor()
+            items = face.canvas.find_withtag(VISITOR_TAG)
+            self.assertEqual(len(items), 4)
+            initial = face.canvas.coords(items[2])
+            tick = after.call_args.args[1]
+            now.return_value = VISITOR_FLIGHT_SECONDS / 2
+            tick()
+            self.assertGreater(face.canvas.coords(items[2])[0], initial[0])
+            self.assertEqual(
+                (face.waiting, face.loading, face.recording, face.speaking, face.sleeping),
+                (True, True, True, True, True),
+            )
+            self.assertEqual(face._last_activity, previous_activity)
+            face._visitor_after = None
+            face.canvas.delete(VISITOR_TAG)
+
+    def test_moth_finishes_reverse_flight_and_schedules_next_visit(self) -> None:
+        face = self.face
+        face.root.after_cancel(face._visitor_after)
+        face._visitor_after = None
+        face._visitor_choices = ["moth"]
+        with patch("face.time.monotonic", return_value=0.0) as now, patch(
+            "face.random.choice", return_value=-1
+        ), patch("face.random.uniform", return_value=60.0), patch.object(
+            face.root, "after", return_value="visitor-timer"
+        ) as after:
+            face._start_visitor()
+            items = face.canvas.find_withtag(VISITOR_TAG)
+            initial = face.canvas.coords(items[2])
+            tick = after.call_args.args[1]
+            now.return_value = VISITOR_FLIGHT_SECONDS / 2
+            tick()
+            self.assertLess(face.canvas.coords(items[2])[0], initial[0])
+            now.return_value = VISITOR_FLIGHT_SECONDS
+            tick()
+            self.assertEqual(face.canvas.find_withtag(VISITOR_TAG), ())
+            self.assertEqual(after.call_args.args[1], face._start_visitor)
+            face._visitor_after = None
+
+    def test_butterfly_is_colorful_and_flaps_across_face(self) -> None:
+        face = self.face
+        face.root.after_cancel(face._visitor_after)
+        face._visitor_after = None
+        face._visitor_choices = ["butterfly"]
+        with patch("face.time.monotonic", return_value=0.0) as now, patch(
+            "face.random.choice", return_value=1
+        ), patch("face.random.uniform", return_value=60.0), patch.object(
+            face.root, "after", return_value="visitor-timer"
+        ) as after:
+            face._start_visitor()
+            items = face.canvas.find_withtag(VISITOR_TAG)
+            self.assertEqual(len(items), 6)
+            self.assertEqual(
+                [face.canvas.itemcget(item, "fill") for item in (items[0], items[1], items[4])],
+                ["#f080d0", "#69a9f5", "#ffe76b"],
+            )
+            initial_wing = face.canvas.coords(items[0])
+            tick = after.call_args.args[1]
+            now.return_value = VISITOR_FLIGHT_SECONDS / 2
+            tick()
+            moved_wing = face.canvas.coords(items[0])
+            self.assertGreater(moved_wing[0], initial_wing[0])
+            self.assertNotEqual(
+                moved_wing[3] - moved_wing[1], initial_wing[3] - initial_wing[1]
+            )
+            now.return_value = VISITOR_FLIGHT_SECONDS
+            tick()
+            self.assertEqual(face.canvas.find_withtag(VISITOR_TAG), ())
+            self.assertEqual(after.call_args.args[1], face._start_visitor)
+            face._visitor_after = None
+
+    def test_visitors_are_shuffled_in_groups_of_three(self) -> None:
+        face = self.face
+        face.root.after_cancel(face._visitor_after)
+        face._visitor_after = None
+        seeded_random = random.Random(123)
+        seen = []
+        with patch("face.time.monotonic", return_value=0.0) as now, patch(
+            "face.random.shuffle", side_effect=seeded_random.shuffle
+        ) as shuffle, patch("face.random.choice", return_value=1), patch(
+            "face.random.uniform", return_value=60.0
+        ), patch.object(face.root, "after", return_value="visitor-timer") as after:
+            for _ in range(6):
+                now.return_value = 0.0
+                face._start_visitor()
+                items = face.canvas.find_withtag(VISITOR_TAG)
+                seen.append(face.canvas.itemcget(items[2], "fill"))
+                tick = after.call_args.args[1]
+                now.return_value = VISITOR_FLIGHT_SECONDS
+                tick()
+                self.assertEqual(face.canvas.find_withtag(VISITOR_TAG), ())
+            self.assertEqual(shuffle.call_count, 2)
+            expected = {"#e7b733", "#8a7f6a", "#53315f"}
+            self.assertEqual(set(seen[:3]), expected)
+            self.assertEqual(set(seen[3:]), expected)
+            face._visitor_after = None
+
+    def test_visit_delay_is_random_between_one_and_five_minutes(self) -> None:
+        face = self.face
+        face.root.after_cancel(face._visitor_after)
+        face._visitor_after = None
+        with patch("face.random.uniform", side_effect=[60_000, 300_000]) as uniform, patch.object(
+            face.root, "after", return_value="visitor-timer"
+        ) as after:
+            for delay in (60_000, 300_000):
+                face._schedule_visitor()
+                after.assert_called_with(delay, face._start_visitor)
+                face._visitor_after = None
+            self.assertEqual(uniform.call_count, 2)
+            uniform.assert_called_with(60_000, 300_000)
+
+    def test_each_visitor_can_loop_in_either_direction(self) -> None:
+        face = self.face
+        face.root.after_cancel(face._visitor_after)
+        face._visitor_after = None
+        with patch("face.time.monotonic", return_value=0.0) as now, patch(
+            "face.random.random", return_value=0.0
+        ), patch("face.random.uniform", return_value=60.0), patch.object(
+            face.root, "after", return_value="visitor-timer"
+        ) as after:
+            for visitor in ("bee", "moth", "butterfly"):
+                for direction in (-1, 1):
+                    with self.subTest(visitor=visitor, direction=direction), patch(
+                        "face.random.choice", return_value=direction
+                    ):
+                        now.return_value = 0.0
+                        face._visitor_choices = [visitor]
+                        face._start_visitor()
+                        body = face.canvas.find_withtag(VISITOR_TAG)[2]
+                        tick = after.call_args.args[1]
+                        positions = []
+                        for progress in (0.35, 0.425, 0.5, 0.575, 0.65):
+                            now.return_value = VISITOR_FLIGHT_SECONDS * progress
+                            tick()
+                            left, top, right, bottom = face.canvas.coords(body)
+                            positions.append(((left + right) / 2, (top + bottom) / 2))
+                        start, first, top, last, end = positions
+                        self.assertAlmostEqual(start[0], end[0])
+                        self.assertAlmostEqual(start[1], end[1])
+                        self.assertGreater(direction * (first[0] - start[0]), 0)
+                        self.assertLess(direction * (last[0] - start[0]), 0)
+                        self.assertLess(top[1], first[1])
+                        self.assertLess(top[1], last[1])
+                        now.return_value = VISITOR_FLIGHT_SECONDS
+                        tick()
+                        self.assertEqual(face.canvas.find_withtag(VISITOR_TAG), ())
+                        self.assertEqual(after.call_args.args[1], face._start_visitor)
+                        face._visitor_after = None
+
+    def test_non_looping_flight_keeps_its_normal_path(self) -> None:
+        face = self.face
+        face.root.after_cancel(face._visitor_after)
+        face._visitor_after = None
+        face._visitor_choices = ["bee"]
+        with patch("face.time.monotonic", return_value=0.0) as now, patch(
+            "face.random.random", return_value=1.0
+        ), patch("face.random.choice", return_value=1), patch(
+            "face.random.uniform", return_value=60.0
+        ), patch.object(face.root, "after", return_value="visitor-timer") as after:
+            face._start_visitor()
+            body = face.canvas.find_withtag(VISITOR_TAG)[2]
+            tick = after.call_args.args[1]
+            now.return_value = VISITOR_FLIGHT_SECONDS / 2
+            tick()
+            left, top, right, bottom = face.canvas.coords(body)
+            self.assertAlmostEqual((left + right) / 2, FACE_WIDTH / 2 * FACE_SCALE)
+            self.assertAlmostEqual((top + bottom) / 2, 60.0 * FACE_SCALE)
+            face.canvas.delete(VISITOR_TAG)
+            face._visitor_after = None
+
+    def test_disabled_animations_cancel_visitor_and_reenable_schedules(self) -> None:
+        face = self.face
+        face.root.after_cancel(face._visitor_after)
+        face._visitor_after = None
+        face._start_visitor()
+        pending = face._visitor_after
+        self.assertTrue(face.canvas.find_withtag(VISITOR_TAG))
+        face.set_animations(False)
+        self.assertIsNone(face._visitor_after)
+        self.assertEqual(face.canvas.find_withtag(VISITOR_TAG), ())
+        self.assertNotIn(pending, face.canvas.tk.splitlist(face.canvas.tk.call("after", "info")))
+        face.set_animations(True)
+        self.assertIsNotNone(face._visitor_after)
+
+    def test_destroy_cancels_visitor_callback(self) -> None:
+        pending = self.face._visitor_after
+        self.face.canvas.destroy()
+        self.assertIsNone(self.face._visitor_after)
+        self.assertNotIn(pending, self.root.tk.splitlist(self.root.tk.call("after", "info")))
 
 
 class EyeAnimationTests(unittest.TestCase):

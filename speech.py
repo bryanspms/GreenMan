@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import re
 import signal
@@ -14,7 +15,6 @@ import tempfile
 import threading
 import time
 import wave
-from array import array
 from array import array
 from collections.abc import Callable
 from pathlib import Path
@@ -94,6 +94,7 @@ class SpeechPlayer:
         on_pause: Callable[[Event], None] | None = None,
         on_resume: Callable[[Event], None] | None = None,
         volume_provider: Callable[[], int] | None = None,
+        speed_provider: Callable[[], int] | None = None,
     ) -> None:
         self._voice_model_provider = voice_model_provider
         self._on_start = on_start
@@ -102,6 +103,7 @@ class SpeechPlayer:
         self._on_pause = on_pause
         self._on_resume = on_resume
         self._volume_provider = volume_provider or (lambda: 100)
+        self._speed_provider = speed_provider or (lambda: 100)
         self.process: subprocess.Popen | None = None
         self.process_lock = Lock()
         self._playback_lock = Lock()
@@ -199,6 +201,9 @@ class SpeechPlayer:
                 self._speak_with_dispatcher(text, cancel_event)
                 return
             arguments = [*arguments, "-a", str(self._speech_volume())]
+            speed = self._speech_speed()
+            if speed != 100:
+                arguments += ["-s", str(round(175 * speed / 100))]
             result = self._run_process(
                 [executable, *arguments],
                 cancel_event,
@@ -255,6 +260,9 @@ class SpeechPlayer:
 
     def _speech_volume(self) -> int:
         return max(0, min(100, self._volume_provider()))
+
+    def _speech_speed(self) -> int:
+        return max(50, min(200, self._speed_provider()))
 
     def _play_piper_audio(
         self,
@@ -408,6 +416,7 @@ class SpeechPlayer:
                 str(interpreter),
                 str(Path(__file__).with_name("speech_dispatcher_helper.py")),
                 str(self._speech_volume()),
+                str(self._speech_speed()),
             ],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
         )
@@ -479,16 +488,36 @@ class SpeechPlayer:
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as output:
                 temporary_path = output.name
+            command = [
+                sys.executable,
+                "-m",
+                "piper",
+                "--model",
+                str(voice_model),
+                "--output-file",
+                temporary_path,
+            ]
+            speed = self._speech_speed()
+            if speed != 100:
+                config_path = Path(f"{voice_model}.json")
+                try:
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    inference = config.get("inference", {})
+                    length_scale = inference.get("length_scale", 1.0)
+                    if (
+                        isinstance(length_scale, bool)
+                        or not isinstance(length_scale, (int, float))
+                        or not math.isfinite(length_scale)
+                        or length_scale <= 0
+                    ):
+                        raise ValueError("Invalid length_scale")
+                except (OSError, ValueError, AttributeError) as error:
+                    raise RuntimeError(
+                        f"Could not read Piper voice speed from {config_path}: {error}"
+                    ) from error
+                command += ["--length-scale", str(length_scale * 100 / speed)]
             result = self._run_process(
-                [
-                    sys.executable,
-                    "-m",
-                    "piper",
-                    "--model",
-                    str(voice_model),
-                    "--output-file",
-                    temporary_path,
-                ],
+                command,
                 cancel_event,
                 input_text=text,
                 discard_stdout=True,

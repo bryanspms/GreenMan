@@ -124,7 +124,8 @@ Experiment with different chunking strategies:
 ## Common Questions
 
 **Q: Can I adjust the reading speed?**
-A: Speed is controlled by your TTS engine settings in Green Man's preferences.
+A: Use **Speech speed** below the volume slider. Changes apply to the next
+document-reading segment.
 
 **Q: What if my document won't open?**
 A: Install the requirements in Green Man's environment with

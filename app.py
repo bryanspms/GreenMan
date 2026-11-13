@@ -836,6 +836,17 @@ def load_speech_volume_preference(path: Path) -> int:
     return max(0, min(100, value))
 
 
+def load_speech_speed_preference(path: Path) -> int:
+    try:
+        preferences = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 100
+    value = preferences.get("speech_speed", 100) if isinstance(preferences, dict) else 100
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 100
+    return max(50, min(200, value))
+
+
 def load_piper_voice_directory(path: Path) -> tuple[Path, str | None]:
     try:
         preferences = json.loads(path.read_text(encoding="utf-8"))
@@ -865,6 +876,7 @@ def save_user_preferences(
     animations_enabled: bool = True,
     piper_directory: Path | None = None,
     speech_volume: int = 100,
+    speech_speed: int = 100,
 ) -> str | None:
     if mode not in TOOL_MODES:
         raise ValueError(f"Unknown assistant mode: {mode}")
@@ -882,6 +894,10 @@ def save_user_preferences(
         raise ValueError("Speech volume must be an integer.")
     if not 0 <= speech_volume <= 100:
         raise ValueError("Speech volume must be between 0 and 100.")
+    if isinstance(speech_speed, bool) or not isinstance(speech_speed, int):
+        raise ValueError("Speech speed must be an integer.")
+    if not 50 <= speech_speed <= 200:
+        raise ValueError("Speech speed must be between 50 and 200.")
     if workspace is not None and not is_valid_workspace(workspace):
         workspace = None
     preferences = {
@@ -894,6 +910,7 @@ def save_user_preferences(
         "animations_enabled": animations_enabled,
         "piper_voice_directory": str(piper_directory) if piper_directory is not None else None,
         "speech_volume": speech_volume,
+        "speech_speed": speech_speed,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1381,6 +1398,7 @@ class DesktopAgent:
         self.speech = SpeechPlayer(
             lambda: self.voice_model_path,
             volume_provider=lambda: self.speech_volume,
+            speed_provider=lambda: self.speech_speed,
             on_start=lambda envelope, window, event: self._speech_events.put(
                 ("start", event, (envelope, window))
             ),
@@ -1417,6 +1435,7 @@ class DesktopAgent:
             value=load_animations_preference(self.preferences_file)
         )
         self.speech_volume = load_speech_volume_preference(self.preferences_file)
+        self.speech_speed = load_speech_speed_preference(self.preferences_file)
         self.voice_choice = tk.StringVar(
             value=(
                 self.voice_model_path.name
@@ -1734,6 +1753,24 @@ class DesktopAgent:
         )
         self.speech_volume_scale.set(self.speech_volume)
         self.speech_volume_scale.pack(anchor=tk.W, fill=tk.X)
+        self.speech_speed_label = tk.Label(
+            brand_title,
+            text=f"Speech speed: {self.speech_speed}%",
+            font=("TkDefaultFont", 8),
+            fg=THEME_COLORS["muted_text"],
+            bg=brand_title.cget("bg"),
+        )
+        self.speech_speed_label.pack(anchor=tk.W, pady=(2, 0))
+        self.speech_speed_scale = ttk.Scale(
+            brand_title,
+            from_=50,
+            to=200,
+            orient=tk.HORIZONTAL,
+            length=140,
+            command=self._on_speech_speed_changed,
+        )
+        self.speech_speed_scale.set(self.speech_speed)
+        self.speech_speed_scale.pack(anchor=tk.W, fill=tk.X)
 
         settings = tk.Frame(brand_row)
         settings.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(12, 0))
@@ -2182,6 +2219,7 @@ class DesktopAgent:
             self.animations_enabled.get(),
             self.piper_voice_directory,
             self.speech_volume,
+            self.speech_speed,
         )
         if error:
             self.status.set(error)
@@ -2189,6 +2227,11 @@ class DesktopAgent:
     def _on_speech_volume_changed(self, value: str) -> None:
         self.speech_volume = round(float(value))
         self.speech_volume_label.config(text=f"Speech volume: {self.speech_volume}%")
+        self._save_preferences()
+
+    def _on_speech_speed_changed(self, value: str) -> None:
+        self.speech_speed = round(float(value))
+        self.speech_speed_label.config(text=f"Speech speed: {self.speech_speed}%")
         self._save_preferences()
 
     def _record_request(self, request: str) -> None:
@@ -2306,6 +2349,7 @@ class DesktopAgent:
                 self.animations_enabled.get(),
                 self.piper_voice_directory,
                 self.speech_volume,
+                self.speech_speed,
             )
             if error:
                 self.status.set(error)

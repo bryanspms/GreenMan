@@ -1,5 +1,6 @@
 import math
 import io
+import json
 import signal
 import struct
 import subprocess
@@ -7,12 +8,14 @@ import sys
 import threading
 import unittest
 import wave
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from unittest.mock import Mock, patch
 
 from speech import SpeechPlayer, compute_speech_envelope, prepare_text_for_speech
+import speech_dispatcher_helper
 
 
 class SpeechTextTests(unittest.TestCase):
@@ -138,6 +141,7 @@ class SpeechPlayerTests(unittest.TestCase):
                 "/usr/bin/python3",
                 str(Path(__file__).with_name("speech_dispatcher_helper.py")),
                 "100",
+                "100",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -164,6 +168,66 @@ class SpeechPlayerTests(unittest.TestCase):
             run_process.call_args.args[0],
             ["/usr/bin/espeak-ng", "--stdin", "-a", "37"],
         )
+
+    def test_speech_speed_is_passed_to_espeak(self) -> None:
+        for speed, expected in ((50, "88"), (150, "262"), (200, "350")):
+            with self.subTest(speed=speed):
+                player = SpeechPlayer(lambda: None, speed_provider=lambda: speed)
+                with patch.object(
+                    player, "speech_engine", return_value=("/usr/bin/espeak-ng", ["--stdin"])
+                ), patch.object(player, "_run_process", return_value=0) as run:
+                    player.speak("Hello", Event())
+                self.assertEqual(run.call_args.args[0][-2:], ["-s", expected])
+
+    def test_piper_speed_respects_voice_default_length_scale(self) -> None:
+        with TemporaryDirectory() as folder:
+            voice = Path(folder) / "voice.onnx"
+            Path(f"{voice}.json").write_text(json.dumps({
+                "inference": {"length_scale": 1.2}
+            }))
+            for speed, expected in ((50, 2.4), (100, None), (200, 0.6)):
+                with self.subTest(speed=speed):
+                    player = SpeechPlayer(lambda: voice, speed_provider=lambda: speed)
+                    player.audio_player = Mock(return_value=("/usr/bin/aplay", []))
+                    player._run_process = Mock(return_value=0)
+                    player._play_piper_audio = Mock(return_value=0)
+                    with patch("speech.importlib.util.find_spec", return_value=object()):
+                        player.speak("Hello", Event())
+                    command = player._run_process.call_args.args[0]
+                    if expected is None:
+                        self.assertNotIn("--length-scale", command)
+                    else:
+                        self.assertAlmostEqual(
+                            float(command[command.index("--length-scale") + 1]), expected
+                        )
+
+    def test_speech_speed_is_passed_to_dispatcher(self) -> None:
+        player = SpeechPlayer(lambda: None, speed_provider=lambda: 150)
+        process = Mock()
+        process.stdin = io.StringIO()
+        process.stdout = io.StringIO("")
+        process.wait.return_value = 0
+        with patch("speech.subprocess.Popen", return_value=process) as popen:
+            player._speak_with_dispatcher("Hello", Event())
+        self.assertEqual(popen.call_args.args[0][-1], "150")
+
+    def test_dispatcher_maps_speed_to_valid_rate(self) -> None:
+        for speed, expected in ((50, -100), (100, 0), (200, 100)):
+            with self.subTest(speed=speed):
+                client = Mock()
+                client.speak.side_effect = lambda text, callback: callback("end")
+                speechd = SimpleNamespace(
+                    SSIPClient=Mock(return_value=client),
+                    SSIPError=type("SSIPError", (Exception,), {}),
+                    SSIPResponseError=type("SSIPResponseError", (Exception,), {}),
+                )
+                with patch.dict(sys.modules, {"speechd": speechd}), patch.object(
+                    sys, "argv", ["speech_dispatcher_helper.py", "100", str(speed)]
+                ), patch.object(sys, "stdin", io.StringIO("Hello")), patch(
+                    "speech_dispatcher_helper.signal.signal"
+                ):
+                    self.assertEqual(speech_dispatcher_helper.main(), 0)
+                client.set_rate.assert_called_once_with(expected)
 
     def test_piper_volume_changes_while_audio_is_streamed(self) -> None:
         with TemporaryDirectory() as folder:

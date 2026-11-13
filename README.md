@@ -424,11 +424,19 @@ spoken responses without changing the computer's system volume.
 It defaults to 100% and remembers the last selected level.
 For Piper, adjustments also affect speech already playing. System voice engines
 apply the setting when the next speech segment starts.
+Use **Speech speed** below the volume slider to slow speech to 50% or speed it
+up to 200%; 100% is the voice's normal rate. The exact change depends on the
+voice and speech engine. The saved setting applies to the next spoken response
+or document-reading segment.
 
 Untick **Green Man Animations** (beside **Read responses aloud**) to keep the face
 still and neutral: no blinking, nose twitching, glancing, sleep animation, lip
-movement, or colored eyes. The choice is saved in local preferences; it is on
-by default.
+movement, colored eyes, or occasional flying bee, moth, or butterfly. The choice
+is saved in local preferences; it is on by default. The visitors appear in a
+random order, with each appearing once before the order is shuffled again. A new
+visitor arrives after a random delay of one to five minutes, and occasionally
+performs a loop-de-loop. They can fly across the face in any state without
+interrupting his activity.
 
 With a Piper voice, the mouth follows the loudness of the generated audio, so it
 matches the actual speech. With the **System voice** engines (`espeak-ng`,

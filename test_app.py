@@ -48,6 +48,7 @@ from app import (
     split_request_steps,
     load_user_preferences,
     load_speech_volume_preference,
+    load_speech_speed_preference,
     load_piper_voice_directory,
     list_piper_voice_models,
     ollama_model_capabilities,
@@ -126,6 +127,17 @@ class EyeLegendIntegrationTests(unittest.TestCase):
             self.assertEqual(volume_scale.get(), 100)
             self.assertEqual(agent.speech._speech_volume(), 100)
             self.assertEqual(agent.speech_volume_label.cget("text"), "Speech volume: 100%")
+            self.assertEqual(agent.speech_speed, 100)
+            self.assertEqual(agent.speech_speed_scale.get(), 100)
+            self.assertGreaterEqual(
+                agent.speech_speed_scale.winfo_rooty(),
+                volume_scale.winfo_rooty() + volume_scale.winfo_height(),
+            )
+            agent.speech_speed_scale.set(150)
+            root.update()
+            self.assertEqual(agent.speech_speed, 150)
+            self.assertEqual(agent.speech._speech_speed(), 150)
+            self.assertEqual(load_speech_speed_preference(agent.preferences_file), 150)
             volume_scale.set(0)
             root.update()
             self.assertEqual(agent.speech_volume, 0)
@@ -672,6 +684,33 @@ class ModelLoadingUITests(unittest.TestCase):
 
 
 class WorkspacePathTests(unittest.TestCase):
+    def test_speech_speed_preferences_default_and_round_trip(self) -> None:
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "preferences.json"
+            self.assertEqual(load_speech_speed_preference(path), 100)
+            for speed in (50, 100, 200):
+                with self.subTest(speed=speed):
+                    self.assertIsNone(
+                        save_user_preferences(
+                            path, None, "Questions only", speech_speed=speed
+                        )
+                    )
+                    self.assertEqual(load_speech_speed_preference(path), speed)
+            for value, expected in ((1, 50), (300, 200), (True, 100), ("fast", 100)):
+                path.write_text(json.dumps({"speech_speed": value}))
+                self.assertEqual(load_speech_speed_preference(path), expected)
+            with self.assertRaises(ValueError):
+                save_user_preferences(path, None, "Questions only", speech_speed=0)
+
+    def test_speech_speed_slider_saves_current_level(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.speech_speed_label = Mock()
+        agent._save_preferences = Mock()
+        agent._on_speech_speed_changed("125")
+        self.assertEqual(agent.speech_speed, 125)
+        agent.speech_speed_label.config.assert_called_once_with(text="Speech speed: 125%")
+        agent._save_preferences.assert_called_once()
+
     def test_speech_volume_preferences_round_trip_and_default(self) -> None:
         with TemporaryDirectory() as folder:
             preferences = Path(folder) / "preferences.json"
