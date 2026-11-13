@@ -41,6 +41,7 @@ VISITOR_TAG = "flying_visitor"
 VISITOR_TYPES = ("bee", "moth", "butterfly", "bird")
 BIRD_COLORS = ("#2878d0", "#d53434", "#f0c832", "#202020", "#925d38")
 SLEEP_HAT_BY_MONTH = {
+    1: "party_hat",
     4: "bunny_ears",
     7: "uncle_sam_hat",
     10: "jack_o_lantern",
@@ -741,6 +742,29 @@ class GreenManFace:
         canvas.create_oval(
             90, 20, 102, 32, fill="#faf8ef", outline="#d9d4c9",
             state=tk.HIDDEN, tags=("sleep_hat", "santa_hat"),
+        )
+        canvas.create_polygon(
+            43, 38, 65, 4, 87, 38, fill="#6c3aa4", outline="#45236d",
+            width=1.2, state=tk.HIDDEN, tags=("sleep_hat", "party_hat"),
+        )
+        canvas.create_oval(
+            62, 1, 68, 7, fill="#ffe175", outline="#ba8d21",
+            state=tk.HIDDEN, tags=("sleep_hat", "party_hat"),
+        )
+        for x, y, color in (
+            (65, 12, "#ffe175"), (60, 19, "#f5a4ce"),
+            (69, 19, "#80d9e3"), (55, 27, "#80d9e3"),
+            (65, 27, "#ffe175"), (75, 27, "#f5a4ce"),
+            (51, 34, "#ffe175"), (59, 34, "#80d9e3"),
+            (71, 34, "#f5a4ce"), (79, 34, "#ffe175"),
+        ):
+            canvas.create_oval(
+                x - 1.5, y - 1.5, x + 1.5, y + 1.5, fill=color, outline="",
+                state=tk.HIDDEN, tags=("sleep_hat", "party_hat", "party_sequin"),
+            )
+        canvas.create_line(
+            43, 38, 87, 38, fill="#ffe175", width=2,
+            state=tk.HIDDEN, tags=("sleep_hat", "party_hat"),
         )
         for left, right in ((40, 58), (72, 90)):
             canvas.create_oval(

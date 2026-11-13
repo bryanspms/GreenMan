@@ -491,7 +491,7 @@ class SleepAnimationTests(unittest.TestCase):
         self.addCleanup(self.clock.stop)
         self.calendar = patch("face.date")
         self.today = self.calendar.start()
-        self.today.today.return_value = date(2026, 1, 15)
+        self.today.today.return_value = date(2026, 2, 15)
         self.addCleanup(self.calendar.stop)
         self.scheduler = Mock()
         self.face = GreenManFace(
@@ -675,6 +675,8 @@ class SleepAnimationTests(unittest.TestCase):
         cap = self.face.canvas.find_withtag("nightcap")
         hat = self.face.canvas.find_withtag("pilgrim_hat")
         santa = self.face.canvas.find_withtag("santa_hat")
+        party = self.face.canvas.find_withtag("party_hat")
+        sequins = self.face.canvas.find_withtag("party_sequin")
         bunny = self.face.canvas.find_withtag("bunny_ears")
         uncle_sam = self.face.canvas.find_withtag("uncle_sam_hat")
         jack = self.face.canvas.find_withtag("jack_o_lantern")
@@ -685,6 +687,9 @@ class SleepAnimationTests(unittest.TestCase):
         red = self.face.canvas.find_withtag("santa_red")
         buckle = self.face.canvas.find_withtag("pilgrim_buckle")
         self.assertTrue(hat)
+        self.assertEqual(len(sequins), 10)
+        self.assertTrue(set(sequins).issubset(party))
+        self.assertGreater(len({self.face.canvas.itemcget(item, "fill") for item in sequins}), 1)
         self.assertEqual(len(bunny), 4)
         self.assertTrue(uncle_sam)
         self.assertEqual(len(horns), 2)
@@ -735,7 +740,7 @@ class SleepAnimationTests(unittest.TestCase):
             with self.subTest(month=month):
                 self.today.today.return_value = date(2026, month, 15)
                 self.tick()
-                outfits = {4: bunny, 7: uncle_sam, 10: jack, 11: hat, 12: santa}
+                outfits = {1: party, 4: bunny, 7: uncle_sam, 10: jack, 11: hat, 12: santa}
                 for outfit_month, items in outfits.items():
                     for item in items:
                         self.assertEqual(
@@ -747,8 +752,11 @@ class SleepAnimationTests(unittest.TestCase):
                         self.face.canvas.itemcget(item, "state"),
                         "hidden" if month in outfits else "normal",
                     )
-                if month in (4, 7, 10):
-                    tag = {4: "bunny_ears", 7: "uncle_sam_hat", 10: "jack_o_lantern"}[month]
+                if month in (1, 4, 7, 10):
+                    tag = {
+                        1: "party_hat", 4: "bunny_ears",
+                        7: "uncle_sam_hat", 10: "jack_o_lantern",
+                    }[month]
                     x1, y1, x2, y2 = self.face.canvas.bbox(tag)
                     self.assertGreaterEqual(x1, 0)
                     self.assertGreaterEqual(y1, 0)
@@ -765,7 +773,7 @@ class SleepAnimationTests(unittest.TestCase):
         self.face.note_activity()
         self.assertTrue(all(
             self.face.canvas.itemcget(item, "state") == "hidden"
-            for item in (*cap, *hat, *santa, *bunny, *uncle_sam, *jack)
+            for item in (*cap, *hat, *santa, *party, *bunny, *uncle_sam, *jack)
         ))
         self._fall_asleep()
         self.assertTrue(all(
@@ -774,7 +782,24 @@ class SleepAnimationTests(unittest.TestCase):
         self.face.set_animations(False)
         self.assertTrue(all(
             self.face.canvas.itemcget(item, "state") == "hidden"
-            for item in (*cap, *hat, *santa, *bunny, *uncle_sam, *jack)
+            for item in (*cap, *hat, *santa, *party, *bunny, *uncle_sam, *jack)
+        ))
+
+    def test_january_party_hat_disappears_on_wake_and_animation_disable(self) -> None:
+        self.today.today.return_value = date(2026, 1, 15)
+        party = self.face.canvas.find_withtag("party_hat")
+        self._fall_asleep()
+        self.assertTrue(all(
+            self.face.canvas.itemcget(item, "state") == "normal" for item in party
+        ))
+        self.face.note_activity()
+        self.assertTrue(all(
+            self.face.canvas.itemcget(item, "state") == "hidden" for item in party
+        ))
+        self._fall_asleep()
+        self.face.set_animations(False)
+        self.assertTrue(all(
+            self.face.canvas.itemcget(item, "state") == "hidden" for item in party
         ))
 
     def test_activity_interrupts_blinks_and_yawn(self) -> None:

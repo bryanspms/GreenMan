@@ -99,6 +99,18 @@ The expanded Document Reader appears between Assistant mode and the conversation
 
 ![Green Man main window with the Document Reader expanded](assets/screenshots/main.png)
 
+### Seasonal sleep outfits
+
+These canvas previews show Green Man's sleep outfits for each featured month.
+
+| January: sequined party hat | April: bunny ears | July: Uncle Sam hat |
+| --- | --- | --- |
+| ![Green Man wearing a sequined New Year's party hat](assets/screenshots/green-man-january.png) | ![Green Man wearing bunny ears](assets/screenshots/green-man-april.png) | ![Green Man wearing an Uncle Sam hat](assets/screenshots/green-man-july.png) |
+
+| October: jack-o'-lantern and devil horns | November: pilgrim hat | December: Santa hat and reindeer antlers |
+| --- | --- | --- |
+| ![Green Man wearing a pumpkin hat and red devil horns](assets/screenshots/green-man-october-horns.png) | ![Green Man wearing a pilgrim hat](assets/screenshots/green-man-november.png) | ![Green Man wearing a Santa hat and reindeer antlers](assets/screenshots/green-man-december.png) |
+
 ### Eye Guide
 
 ![Eye Guide window showing the face's eye states](assets/screenshots/eye-guide.png)
@@ -448,6 +460,7 @@ the computer's local month:
 
 | Month | Sleep outfit |
 | --- | --- |
+| January | Sequined New Year's party hat |
 | April | Bunny ears |
 | July | Uncle Sam hat |
 | October | Red devil horns and a grooved, carved jack-o'-lantern with a candle inside |
