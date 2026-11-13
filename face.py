@@ -40,7 +40,13 @@ VISITOR_LOOP_CHANCE = 0.25
 VISITOR_TAG = "flying_visitor"
 VISITOR_TYPES = ("bee", "moth", "butterfly", "bird")
 BIRD_COLORS = ("#2878d0", "#d53434", "#f0c832", "#202020", "#925d38")
-SLEEP_HAT_BY_MONTH = {11: "pilgrim_hat"}
+SLEEP_HAT_BY_MONTH = {
+    4: "bunny_ears",
+    7: "uncle_sam_hat",
+    10: "jack_o_lantern",
+    11: "pilgrim_hat",
+    12: "santa_hat",
+}
 
 
 class EyeLegend:
@@ -703,6 +709,124 @@ class GreenManFace:
             32, 34, 98, 34, 95, 40, 35, 40,
             fill="#171717", outline="#080808", width=1.2,
             state=tk.HIDDEN, tags=("sleep_hat", "pilgrim_hat"),
+        )
+        def antler(side: int, *coordinates: float) -> None:
+            points = [
+                center_x + side * value if index % 2 == 0 else value
+                for index, value in enumerate(coordinates)
+            ]
+            canvas.create_line(
+                *points, fill="#80512f", width=3, capstyle=tk.ROUND,
+                joinstyle=tk.ROUND, state=tk.HIDDEN,
+                tags=("sleep_hat", "santa_hat", "reindeer_antlers"),
+            )
+
+        for side in (-1, 1):
+            antler(side, 24, 35, 35, 25, 38, 12, 35, 5)
+            antler(side, 35, 25, 45, 19, 47, 10)
+            antler(side, 38, 16, 43, 12, 44, 6)
+        canvas.create_polygon(
+            39, 38, 42, 28, 48, 19, 57, 14, 68, 13,
+            78, 16, 86, 22, 94, 24, 96, 29, 86, 29,
+            77, 25, 83, 38,
+            fill="#c92735", outline="#7f1821", width=1.5, smooth=True,
+            state=tk.HIDDEN, tags=("sleep_hat", "santa_hat", "santa_red"),
+        )
+        canvas.create_polygon(
+            39, 36, 44, 34, 79, 34, 84, 36, 84, 40,
+            79, 42, 44, 42, 39, 40,
+            fill="#faf8ef", outline="#d9d4c9", width=1.2, smooth=True,
+            state=tk.HIDDEN, tags=("sleep_hat", "santa_hat"),
+        )
+        canvas.create_oval(
+            90, 20, 102, 32, fill="#faf8ef", outline="#d9d4c9",
+            state=tk.HIDDEN, tags=("sleep_hat", "santa_hat"),
+        )
+        for left, right in ((40, 58), (72, 90)):
+            canvas.create_oval(
+                left, 3, right, 39, fill="#faf8ef", outline="#c9c1ba",
+                width=1.2, state=tk.HIDDEN, tags=("sleep_hat", "bunny_ears"),
+            )
+            canvas.create_oval(
+                left + 5, 9, right - 5, 32, fill="#efa3b6", outline="",
+                state=tk.HIDDEN, tags=("sleep_hat", "bunny_ears"),
+            )
+        canvas.create_polygon(
+            43, 35, 44, 5, 86, 5, 87, 35, fill="#faf8ef", outline="#a29c95",
+            width=1.2, state=tk.HIDDEN, tags=("sleep_hat", "uncle_sam_hat"),
+        )
+        for left, right in ((45, 51), (58, 64), (71, 77), (84, 86)):
+            canvas.create_rectangle(
+                left, 6, right, 27, fill="#c92735", outline="",
+                state=tk.HIDDEN, tags=("sleep_hat", "uncle_sam_hat"),
+            )
+        canvas.create_rectangle(
+            43, 26, 87, 35, fill="#244b91", outline="",
+            state=tk.HIDDEN, tags=("sleep_hat", "uncle_sam_hat"),
+        )
+        for x in (51, 65, 79):
+            canvas.create_polygon(
+                x, 27, x + 1, 29, x + 3, 29, x + 1.5, 31,
+                x + 2, 33, x, 32, x - 2, 33, x - 1.5, 31,
+                x - 3, 29, x - 1, 29,
+                fill="#faf8ef", outline="", state=tk.HIDDEN,
+                tags=("sleep_hat", "uncle_sam_hat"),
+            )
+        canvas.create_polygon(
+            32, 34, 98, 34, 95, 40, 35, 40,
+            fill="#faf8ef", outline="#a29c95", width=1.2,
+            state=tk.HIDDEN, tags=("sleep_hat", "uncle_sam_hat"),
+        )
+        for side in (-1, 1):
+            canvas.create_polygon(
+                center_x + side * 24, 28,
+                center_x + side * 31, 25,
+                center_x + side * 39, 18,
+                center_x + side * 43, 4,
+                center_x + side * 44, 13,
+                center_x + side * 42, 24,
+                center_x + side * 35, 33,
+                fill="#d42d35", outline="#861920", width=1.2, smooth=True,
+                state=tk.HIDDEN, tags=("sleep_hat", "jack_o_lantern", "devil_horns"),
+            )
+        canvas.create_oval(
+            35, 8, 95, 40, fill="#ec7a18", outline="#8a3c0d", width=1.5,
+            state=tk.HIDDEN, tags=("sleep_hat", "jack_o_lantern"),
+        )
+        for points in (
+            (53, 10, 43, 16, 42, 24, 43, 32, 53, 38),
+            (59, 9, 52, 16, 50, 24, 52, 32, 59, 39),
+            (65, 9, 62, 16, 61, 24, 62, 32, 65, 39),
+            (71, 9, 78, 16, 80, 24, 78, 32, 71, 39),
+            (77, 10, 87, 16, 88, 24, 87, 32, 77, 38),
+        ):
+            canvas.create_line(
+                *points, fill="#b85410", width=1.2, smooth=True,
+                state=tk.HIDDEN, tags=("sleep_hat", "jack_o_lantern", "jack_groove"),
+            )
+        canvas.create_polygon(
+            61, 10, 62, 4, 69, 3, 68, 10, fill="#576c2c", outline="#39491a",
+            state=tk.HIDDEN, tags=("sleep_hat", "jack_o_lantern"),
+        )
+        for points in ((49, 22, 55, 14, 61, 22), (69, 22, 75, 14, 81, 22)):
+            canvas.create_polygon(
+                *points, fill="#ffdb61", outline="#8a3c0d",
+                state=tk.HIDDEN, tags=("sleep_hat", "jack_o_lantern", "jack_glow"),
+            )
+        canvas.create_polygon(
+            46, 26, 51, 34, 79, 34, 84, 26, 77, 29, 72, 27,
+            66, 30, 59, 27, 53, 29,
+            fill="#54240b", outline="", state=tk.HIDDEN,
+            tags=("sleep_hat", "jack_o_lantern", "jack_mouth"),
+        )
+        canvas.create_rectangle(
+            63, 30, 67, 33, fill="#fff1c1", outline="",
+            state=tk.HIDDEN, tags=("sleep_hat", "jack_o_lantern", "jack_candle"),
+        )
+        canvas.create_polygon(
+            63, 29, 65, 24, 67, 29, 65, 31,
+            fill="#ffdf4f", outline="", state=tk.HIDDEN,
+            tags=("sleep_hat", "jack_o_lantern", "jack_candle"),
         )
 
     def _start_eye_animation(self) -> None:

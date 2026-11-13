@@ -674,8 +674,49 @@ class SleepAnimationTests(unittest.TestCase):
         self._fall_asleep()
         cap = self.face.canvas.find_withtag("nightcap")
         hat = self.face.canvas.find_withtag("pilgrim_hat")
+        santa = self.face.canvas.find_withtag("santa_hat")
+        bunny = self.face.canvas.find_withtag("bunny_ears")
+        uncle_sam = self.face.canvas.find_withtag("uncle_sam_hat")
+        jack = self.face.canvas.find_withtag("jack_o_lantern")
+        horns = self.face.canvas.find_withtag("devil_horns")
+        grooves = self.face.canvas.find_withtag("jack_groove")
+        candle = self.face.canvas.find_withtag("jack_candle")
+        antlers = self.face.canvas.find_withtag("reindeer_antlers")
+        red = self.face.canvas.find_withtag("santa_red")
         buckle = self.face.canvas.find_withtag("pilgrim_buckle")
         self.assertTrue(hat)
+        self.assertEqual(len(bunny), 4)
+        self.assertTrue(uncle_sam)
+        self.assertEqual(len(horns), 2)
+        self.assertTrue(set(horns).issubset(jack))
+        self.assertTrue(all(
+            self.face.canvas.itemcget(item, "fill") == "#d42d35" for item in horns
+        ))
+        self.assertEqual(len(grooves), 5)
+        self.assertTrue(set(grooves).issubset(jack))
+        self.assertTrue(all(
+            self.face.canvas.type(item) == "line"
+            and self.face.canvas.itemcget(item, "smooth") != "0"
+            for item in grooves
+        ))
+        self.assertLess(max(grooves), min(self.face.canvas.find_withtag("jack_glow")))
+        self.assertEqual(len(candle), 2)
+        self.assertTrue(set(candle).issubset(jack))
+        self.assertEqual(self.face.canvas.itemcget(candle[0], "fill"), "#fff1c1")
+        self.assertEqual(self.face.canvas.itemcget(candle[1], "fill"), "#ffdf4f")
+        self.assertEqual(len(self.face.canvas.find_withtag("jack_glow")), 2)
+        self.assertEqual(
+            {self.face.canvas.itemcget(item, "fill") for item in bunny},
+            {"#faf8ef", "#efa3b6"},
+        )
+        self.assertTrue(
+            {"#faf8ef", "#c92735", "#244b91"}.issubset(
+                {self.face.canvas.itemcget(item, "fill") for item in uncle_sam}
+            )
+        )
+        self.assertEqual(len(antlers), 6)
+        self.assertEqual(len(red), 1)
+        self.assertEqual(self.face.canvas.itemcget(red[0], "fill"), "#c92735")
         self.assertEqual(len(buckle), 1)
         self.assertEqual(self.face.canvas.itemcget(hat[0], "fill"), "#171717")
         self.assertEqual(self.face.canvas.itemcget(buckle[0], "outline"), "#c0c0c0")
@@ -694,26 +735,46 @@ class SleepAnimationTests(unittest.TestCase):
             with self.subTest(month=month):
                 self.today.today.return_value = date(2026, month, 15)
                 self.tick()
-                for item in hat:
-                    self.assertEqual(
-                        self.face.canvas.itemcget(item, "state"),
-                        "normal" if month == 11 else "hidden",
-                    )
+                outfits = {4: bunny, 7: uncle_sam, 10: jack, 11: hat, 12: santa}
+                for outfit_month, items in outfits.items():
+                    for item in items:
+                        self.assertEqual(
+                            self.face.canvas.itemcget(item, "state"),
+                            "normal" if month == outfit_month else "hidden",
+                        )
                 for item in cap:
                     self.assertEqual(
                         self.face.canvas.itemcget(item, "state"),
-                        "hidden" if month == 11 else "normal",
+                        "hidden" if month in outfits else "normal",
                     )
-        self.today.today.return_value = date(2026, 11, 30)
+                if month in (4, 7, 10):
+                    tag = {4: "bunny_ears", 7: "uncle_sam_hat", 10: "jack_o_lantern"}[month]
+                    x1, y1, x2, y2 = self.face.canvas.bbox(tag)
+                    self.assertGreaterEqual(x1, 0)
+                    self.assertGreaterEqual(y1, 0)
+                    self.assertLessEqual(x2, round(FACE_WIDTH * FACE_SCALE))
+                    self.assertLess(
+                        y2, min(self.face.canvas.coords(eye)[1] for eye in self.face._eyes)
+                    )
+        x1, y1, x2, y2 = self.face.canvas.bbox("santa_hat")
+        self.assertGreaterEqual(x1, 0)
+        self.assertGreaterEqual(y1, 0)
+        self.assertLessEqual(x2, round(FACE_WIDTH * FACE_SCALE))
+        self.assertLess(y2, min(self.face.canvas.coords(eye)[1] for eye in self.face._eyes))
         self.tick()
         self.face.note_activity()
         self.assertTrue(all(
-            self.face.canvas.itemcget(item, "state") == "hidden" for item in (*cap, *hat)
+            self.face.canvas.itemcget(item, "state") == "hidden"
+            for item in (*cap, *hat, *santa, *bunny, *uncle_sam, *jack)
         ))
         self._fall_asleep()
+        self.assertTrue(all(
+            self.face.canvas.itemcget(item, "state") == "normal" for item in santa
+        ))
         self.face.set_animations(False)
         self.assertTrue(all(
-            self.face.canvas.itemcget(item, "state") == "hidden" for item in (*cap, *hat)
+            self.face.canvas.itemcget(item, "state") == "hidden"
+            for item in (*cap, *hat, *santa, *bunny, *uncle_sam, *jack)
         ))
 
     def test_activity_interrupts_blinks_and_yawn(self) -> None:

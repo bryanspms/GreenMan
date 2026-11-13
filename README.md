@@ -90,9 +90,52 @@ flowchart LR
 
 ## <span style="color: #2f6b3f;">Screen Shots</span>
 
-![GreenMan](assets/greenMan-AppScreenshot.png)
+These examples use sample data. File pickers and message dialogs can look
+different depending on the desktop environment.
 
-![GreenMan](assets/greenMan-EditSystemPrompt.png)
+### Main window
+
+The expanded Document Reader appears between Assistant mode and the conversation.
+
+![Green Man main window with the Document Reader expanded](assets/screenshots/main.png)
+
+### Eye Guide
+
+![Eye Guide window showing the face's eye states](assets/screenshots/eye-guide.png)
+
+### Edit system prompt
+
+![System prompt editor](assets/screenshots/system-prompt.png)
+
+### Request history
+
+![Request history window](assets/screenshots/history.png)
+
+### Confirm assistant action
+
+![Example action approval dialog](assets/screenshots/approval.png)
+
+### File and folder dialogs
+
+**Choose a workspace**
+
+![Workspace folder chooser](assets/screenshots/select-workspace.png)
+
+**Choose a Piper voice model folder**
+
+![Voice model folder chooser](assets/screenshots/select-voice-folder.png)
+
+**Open a document**
+
+![Document file chooser](assets/screenshots/select-document.png)
+
+**Save output**
+
+![Save output file dialog](assets/screenshots/save-output.png)
+
+### Example error
+
+![Unsupported document format error](assets/screenshots/document-error.png)
 
 [Back to TOC](#table-of-contents)
 
@@ -400,9 +443,20 @@ disappear when he stops speaking.
 
 After 60 seconds without activity in the app, Green Man blinks slowly three
 times and yawns with half-closed eyes before closing them, putting on his sleep
-hat, and letting sleepy Z's float from his mouth. In November he wears a black
-pilgrim hat with a silver buckle; otherwise he wears his green nightcap. The hat
-disappears when he wakes.
+hat, and letting sleepy Z's float from his mouth. His sleep outfit depends on
+the computer's local month:
+
+| Month | Sleep outfit |
+| --- | --- |
+| April | Bunny ears |
+| July | Uncle Sam hat |
+| October | Red devil horns and a grooved, carved jack-o'-lantern with a candle inside |
+| November | Black pilgrim hat with a silver buckle |
+| December | Red Santa hat and reindeer antlers |
+| Other months | Green nightcap |
+
+The outfit updates if the month changes while he is asleep and disappears when
+he wakes.
 Mouse or keyboard activity interrupts this sequence or wakes him. He stays
 awake while loading a model, waiting for a response, recording, or speaking,
 and the idle countdown restarts when those activities finish. Press
@@ -431,20 +485,22 @@ apply the setting when the next speech segment starts.
 Use **Speech speed** below the volume slider to slow speech to 50% or speed it
 up to 200%; 100% is the voice's normal rate. The exact change depends on the
 voice and speech engine. The saved setting applies to the next spoken response
-or document-reading segment.
+or document-reading segment, not to audio already playing.
 
 Untick **Green Man Animations** (beside **Read responses aloud**) to keep the face
 still and neutral: no blinking, nose twitching, glancing, sleep animation, lip
 movement, colored eyes, or occasional flying bee, moth, butterfly, or bird. The
 choice is saved in local preferences; it is on by default. The visitors appear
 in a random order, with each appearing once before the order is shuffled again.
+The same visitor can appear twice in a row across two shuffled groups.
 The bird flaps its wings and can be blue, red, yellow, black, or brown. A new
-visitor arrives after a random delay of one to five minutes. The bee, moth, and
-butterfly occasionally perform a loop-de-loop; the bird does not. They can fly
-across the face in any state without interrupting his activity. To preview the
-next visitor, press **Ctrl+Shift+A**
-in the main window. The shortcut respects the animation setting and waits for
-an active visitor to finish before it can start another.
+visitor arrives after a random delay of one to five minutes, starting after the
+previous flight finishes. The bee, moth, and butterfly occasionally perform a
+loop-de-loop; the bird does not. They can fly across the face in any state
+without interrupting his activity. To preview the next visitor, press
+**Ctrl+Shift+A** in the main window. The shortcut respects the animation setting
+and does nothing while a visitor is already flying; press it again after the
+flight finishes.
 
 With a Piper voice, the mouth follows the loudness of the generated audio, so it
 matches the actual speech. With the **System voice** engines (`espeak-ng`,
