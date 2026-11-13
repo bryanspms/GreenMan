@@ -210,13 +210,20 @@ class MarkdownText(scrolledtext.ScrolledText):
             
             # Get the position BEFORE inserting the content
             start_index = self.index(tk.END)
-            print(f"DEBUG: Before insert, tk.END={start_index}, content={repr(content)}", flush=True)
+            current_state = self.cget("state")
+            print(f"DEBUG: Before insert, state={repr(current_state)}, tk.END={start_index}, content={repr(content)}", flush=True)
+            
+            # Verify widget is NORMAL before insert
+            if current_state != "normal":
+                print(f"ERROR: Widget is not NORMAL! State is: {repr(current_state)}", flush=True)
+                # Force it to normal
+                self.config(state=tk.NORMAL)
             
             self.insert(tk.END, content)
             
             # Verify the insert actually happened
-            widget_content_before = self.get(start_index, tk.END)
-            print(f"DEBUG: After insert, widget content from {start_index}: {repr(widget_content_before)}", flush=True)
+            widget_content_after = self.get(start_index, tk.END)
+            print(f"DEBUG: After insert, widget content from {start_index}: {repr(widget_content_after)}", flush=True)
             
             end_index = self.index(tk.END)
             print(f"DEBUG: After insert, tk.END={end_index}, length={len(content)}", flush=True)
