@@ -112,14 +112,18 @@ class MarkdownText(scrolledtext.ScrolledText):
 
     def append_markdown(self, text: str) -> None:
         """Append text with Markdown formatting applied to existing content."""
+        print(f"DEBUG append_markdown: was_disabled={self.cget('state')}", flush=True)
         was_disabled = self.cget("state") == tk.DISABLED
         self.config(state=tk.NORMAL)
+        print(f"DEBUG append_markdown: after setNORMAL, state={self.cget('state')}", flush=True)
         
         # Parse and append the markdown text (don't clear)
         self._parse_and_insert_markdown(text)
         
+        print(f"DEBUG append_markdown: after parse, state={self.cget('state')}", flush=True)
         if was_disabled:
             self.config(state=tk.DISABLED)
+            print(f"DEBUG append_markdown: set back to DISABLED", flush=True)
 
     def _parse_and_insert_markdown(self, text: str) -> None:
         """Parse Markdown and insert formatted text with tags."""
