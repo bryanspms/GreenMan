@@ -7,6 +7,7 @@ import random
 import time
 import tkinter as tk
 from collections.abc import Callable, Mapping
+from datetime import date
 
 FACE_WIDTH = 130
 FACE_HEIGHT = 130
@@ -37,7 +38,9 @@ VISITOR_FRAME_MS = 50
 VISITOR_FLIGHT_SECONDS = 5.0
 VISITOR_LOOP_CHANCE = 0.25
 VISITOR_TAG = "flying_visitor"
-VISITOR_TYPES = ("bee", "moth", "butterfly")
+VISITOR_TYPES = ("bee", "moth", "butterfly", "bird")
+BIRD_COLORS = ("#2878d0", "#d53434", "#f0c832", "#202020", "#925d38")
+SLEEP_HAT_BY_MONTH = {11: "pilgrim_hat"}
 
 
 class EyeLegend:
@@ -151,6 +154,7 @@ class GreenManFace:
         self._last_activity = time.monotonic()
         self._sleep_transition_started: float | None = None
         self._sleep_started = 0.0
+        self._sleep_hat_month: int | None = None
         self._eyes: list[int] = []
         self.mouth_level = 0.0
         self._mouth_after: str | None = None
@@ -181,6 +185,15 @@ class GreenManFace:
             delay = round(random.uniform(VISITOR_MIN_DELAY_MS, VISITOR_MAX_DELAY_MS))
             self._visitor_after = self.root.after(delay, self._start_visitor)
 
+    def show_next_visitor(self) -> None:
+        """Start the next visitor now unless animations are off or one is flying."""
+        if not self.animations_enabled or self.canvas.find_withtag(VISITOR_TAG):
+            return
+        if self._visitor_after is not None:
+            self.root.after_cancel(self._visitor_after)
+            self._visitor_after = None
+        self._start_visitor()
+
     def _start_visitor(self) -> None:
         self._visitor_after = None
         if not self.animations_enabled:
@@ -191,24 +204,34 @@ class GreenManFace:
         visitor = self._visitor_choices.pop()
         direction = random.choice((-1, 1))
         height = random.uniform(35.0, 95.0)
-        loop = random.random() < VISITOR_LOOP_CHANCE
+        loop = visitor != "bird" and random.random() < VISITOR_LOOP_CHANCE
         started = time.monotonic()
-        wing_colors = {
-            "bee": ("#f6e5bb", "#f6e5bb"),
-            "moth": ("#d7d4be", "#d7d4be"),
-            "butterfly": ("#f080d0", "#69a9f5"),
-        }[visitor]
-        body_color = {
-            "bee": "#e7b733",
-            "moth": "#8a7f6a",
-            "butterfly": "#53315f",
-        }[visitor]
-        wing_a = self.canvas.create_oval(
-            0, 0, 0, 0, fill=wing_colors[0], outline="", tags=VISITOR_TAG
-        )
-        wing_b = self.canvas.create_oval(
-            0, 0, 0, 0, fill=wing_colors[1], outline="", tags=VISITOR_TAG
-        )
+        if visitor == "bird":
+            body_color = random.choice(BIRD_COLORS)
+            wing_colors = (body_color, body_color)
+            wing_a = self.canvas.create_polygon(
+                0, 0, 0, 0, 0, 0, fill=body_color, outline="", tags=VISITOR_TAG
+            )
+            wing_b = self.canvas.create_polygon(
+                0, 0, 0, 0, 0, 0, fill=body_color, outline="", tags=VISITOR_TAG
+            )
+        else:
+            wing_colors = {
+                "bee": ("#f6e5bb", "#f6e5bb"),
+                "moth": ("#d7d4be", "#d7d4be"),
+                "butterfly": ("#f080d0", "#69a9f5"),
+            }[visitor]
+            body_color = {
+                "bee": "#e7b733",
+                "moth": "#8a7f6a",
+                "butterfly": "#53315f",
+            }[visitor]
+            wing_a = self.canvas.create_oval(
+                0, 0, 0, 0, fill=wing_colors[0], outline="", tags=VISITOR_TAG
+            )
+            wing_b = self.canvas.create_oval(
+                0, 0, 0, 0, fill=wing_colors[1], outline="", tags=VISITOR_TAG
+            )
         body = self.canvas.create_oval(
             0, 0, 0, 0, fill=body_color, outline=self.colors["text"], tags=VISITOR_TAG
         )
@@ -224,6 +247,20 @@ class GreenManFace:
             )
             if visitor == "butterfly" else ()
         )
+        if visitor == "bird":
+            tail = self.canvas.create_polygon(
+                0, 0, 0, 0, 0, 0, fill=body_color, outline="", tags=VISITOR_TAG
+            )
+            head = self.canvas.create_oval(
+                0, 0, 0, 0, fill=body_color, outline=self.colors["text"], tags=VISITOR_TAG
+            )
+            beak = self.canvas.create_polygon(
+                0, 0, 0, 0, 0, 0, fill="#f3a229", outline="", tags=VISITOR_TAG
+            )
+            eye = self.canvas.create_oval(
+                0, 0, 0, 0, fill="white", outline="", tags=VISITOR_TAG
+            )
+            self.canvas.itemconfigure(stripe, state=tk.HIDDEN)
         self.canvas.tag_raise(VISITOR_TAG)
 
         def tick() -> None:
@@ -242,7 +279,8 @@ class GreenManFace:
                 travel = min(progress, 0.35) / 0.7 + max(progress - 0.65, 0.0) / 0.7
             else:
                 travel = progress
-            x = -8.0 + (FACE_WIDTH + 16.0) * (
+            margin = 22.0 if visitor == "bird" else 8.0
+            x = -margin + (FACE_WIDTH + 2 * margin) * (
                 travel if direction > 0 else 1.0 - travel
             )
             y = height + 6.0 * math.sin(travel * math.tau * 2)
@@ -255,7 +293,25 @@ class GreenManFace:
             def place(item: int, *coordinates: float) -> None:
                 self.canvas.coords(item, *(value * FACE_SCALE for value in coordinates))
 
-            if visitor == "butterfly":
+            if visitor == "bird":
+                flap = math.sin(elapsed * 10)
+
+                def bird_points(*coordinates: float) -> tuple[float, ...]:
+                    return tuple(
+                        x + direction * value if index % 2 == 0 else y + value
+                        for index, value in enumerate(coordinates)
+                    )
+
+                place(wing_a, *bird_points(-5, 0, -13, -5 - 9 * flap, 2, -3))
+                place(wing_b, *bird_points(0, 0, 5, -6 - 9 * flap, 7, 0))
+                place(body, x - 10, y - 5, x + 10, y + 5)
+                place(tail, *bird_points(-8, -2, -18, -6, -15, 3))
+                place(head, x + direction * 7 - 4, y - 7,
+                      x + direction * 7 + 4, y + 1)
+                place(beak, *bird_points(10, -5, 15, -3, 10, -1))
+                place(eye, x + direction * 8 - 1, y - 5,
+                      x + direction * 8 + 1, y - 3)
+            elif visitor == "butterfly":
                 place(wing_a, x - 7, y - wing_height - 2, x, y + 3)
                 place(wing_b, x, y - wing_height - 2, x + 7, y + 3)
                 place(spots[0], x - 5, y - wing_height / 2, x - 3, y - wing_height / 2 + 2)
@@ -418,9 +474,23 @@ class GreenManFace:
         if self.sleeping:
             self.sleeping = False
             self._set_lids(0.0)
-            self.canvas.itemconfigure("nightcap", state=tk.HIDDEN)
+            self.canvas.itemconfigure("sleep_hat", state=tk.HIDDEN)
+            self._sleep_hat_month = None
             for item in self._sleep_zs:
                 self.canvas.itemconfigure(item, state=tk.HIDDEN)
+
+    def start_sleep_transition(self) -> None:
+        """Start the normal idle-to-sleep animation when the face is available."""
+        if (
+            not self.animations_enabled
+            or self.sleeping
+            or self._sleep_transition_started is not None
+            or self.loading or self.waiting or self.recording or self.speaking
+        ):
+            return
+        self._sleep_transition_started = time.monotonic()
+        self._set_nose(0.0)
+        self._nose_twitch_frame = len(NOSE_TWITCH_OFFSETS)
 
     def _animate_sleep_transition(self, now: float) -> None:
         assert self._sleep_transition_started is not None
@@ -439,10 +509,16 @@ class GreenManFace:
             self._sleep_started = now
             self._set_mouth(0.0)
             self._set_lids(1.0)
-            self.canvas.itemconfigure("nightcap", state=tk.NORMAL)
             self._animate_sleep(now)
 
     def _animate_sleep(self, now: float) -> None:
+        month = date.today().month
+        if month != self._sleep_hat_month:
+            self.canvas.itemconfigure("sleep_hat", state=tk.HIDDEN)
+            self.canvas.itemconfigure(
+                SLEEP_HAT_BY_MONTH.get(month, "nightcap"), state=tk.NORMAL
+            )
+            self._sleep_hat_month = month
         for index, item in enumerate(self._sleep_zs):
             progress = (
                 (now - self._sleep_started + index * SLEEP_Z_CYCLE_SECONDS / 3)
@@ -591,13 +667,13 @@ class GreenManFace:
             78, 16, 86, 22, 94, 24, 96, 29, 86, 29,
             77, 25, 83, 38,
             fill="#8cbd3c", outline="#28552e", width=1.5, smooth=True,
-            state=tk.HIDDEN, tags="nightcap",
+            state=tk.HIDDEN, tags=("sleep_hat", "nightcap"),
         )
         canvas.create_polygon(
             39, 36, 44, 34, 79, 34, 84, 36, 84, 40,
             79, 42, 44, 42, 39, 40,
             fill="#b9dd83", outline="#28552e", width=1.2, smooth=True,
-            state=tk.HIDDEN, tags="nightcap",
+            state=tk.HIDDEN, tags=("sleep_hat", "nightcap"),
         )
         for x, y, radius in (
             (96, 26, 5), (91, 24, 3.2), (92, 20, 3.2),
@@ -608,8 +684,26 @@ class GreenManFace:
             canvas.create_oval(
                 x - radius, y - radius, x + radius, y + radius,
                 fill="#d0ed9e", outline="", state=tk.HIDDEN,
-                tags=("nightcap", "nightcap_pom"),
+                tags=("sleep_hat", "nightcap", "nightcap_pom"),
             )
+        canvas.create_polygon(
+            43, 35, 47, 7, 83, 7, 87, 35,
+            fill="#171717", outline="#080808", width=1.2,
+            state=tk.HIDDEN, tags=("sleep_hat", "pilgrim_hat"),
+        )
+        canvas.create_rectangle(
+            43, 26, 87, 34, fill="#383838", outline="",
+            state=tk.HIDDEN, tags=("sleep_hat", "pilgrim_hat"),
+        )
+        canvas.create_rectangle(
+            60, 25, 70, 35, fill="", outline="#c0c0c0", width=2,
+            state=tk.HIDDEN, tags=("sleep_hat", "pilgrim_hat", "pilgrim_buckle"),
+        )
+        canvas.create_polygon(
+            32, 34, 98, 34, 95, 40, 35, 40,
+            fill="#171717", outline="#080808", width=1.2,
+            state=tk.HIDDEN, tags=("sleep_hat", "pilgrim_hat"),
+        )
 
     def _start_eye_animation(self) -> None:
         gaze = [0.0, 0.0]
@@ -636,9 +730,7 @@ class GreenManFace:
                 and not (self.loading or self.waiting or self.recording or self.speaking)
                 and now - self._last_activity >= SLEEP_IDLE_SECONDS
             ):
-                self._sleep_transition_started = now
-                self._set_nose(0.0)
-                self._nose_twitch_frame = len(NOSE_TWITCH_OFFSETS)
+                self.start_sleep_transition()
             if self._sleep_transition_started is not None:
                 blink_frame = len(BLINK_LID_LEVELS) + 1
                 self._animate_sleep_transition(now)

@@ -399,11 +399,15 @@ his mouth opens and closes, and his eyebrows lift for emphasis. The glasses
 disappear when he stops speaking.
 
 After 60 seconds without activity in the app, Green Man blinks slowly three
-times and yawns with half-closed eyes before closing them, putting on a nightcap,
-and letting sleepy Z's float from his mouth. The nightcap disappears when he wakes.
+times and yawns with half-closed eyes before closing them, putting on his sleep
+hat, and letting sleepy Z's float from his mouth. In November he wears a black
+pilgrim hat with a silver buckle; otherwise he wears his green nightcap. The hat
+disappears when he wakes.
 Mouse or keyboard activity interrupts this sequence or wakes him. He stays
 awake while loading a model, waiting for a response, recording, or speaking,
-and the idle countdown restarts when those activities finish.
+and the idle countdown restarts when those activities finish. Press
+**Ctrl+Shift+Z** in the main window to start the same sleep sequence without
+waiting; the shortcut respects the animation setting and active states.
 
 His eyes also show what the app is doing:
 
@@ -431,12 +435,16 @@ or document-reading segment.
 
 Untick **Green Man Animations** (beside **Read responses aloud**) to keep the face
 still and neutral: no blinking, nose twitching, glancing, sleep animation, lip
-movement, colored eyes, or occasional flying bee, moth, or butterfly. The choice
-is saved in local preferences; it is on by default. The visitors appear in a
-random order, with each appearing once before the order is shuffled again. A new
-visitor arrives after a random delay of one to five minutes, and occasionally
-performs a loop-de-loop. They can fly across the face in any state without
-interrupting his activity.
+movement, colored eyes, or occasional flying bee, moth, butterfly, or bird. The
+choice is saved in local preferences; it is on by default. The visitors appear
+in a random order, with each appearing once before the order is shuffled again.
+The bird flaps its wings and can be blue, red, yellow, black, or brown. A new
+visitor arrives after a random delay of one to five minutes. The bee, moth, and
+butterfly occasionally perform a loop-de-loop; the bird does not. They can fly
+across the face in any state without interrupting his activity. To preview the
+next visitor, press **Ctrl+Shift+A**
+in the main window. The shortcut respects the animation setting and waits for
+an active visitor to finish before it can start another.
 
 With a Piper voice, the mouth follows the loudness of the generated audio, so it
 matches the actual speech. With the **System voice** engines (`espeak-ng`,

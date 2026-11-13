@@ -75,6 +75,68 @@ from window_accessibility import AccessibleWindow
 
 
 class EyeLegendIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _cancel_pending_callbacks(root: tk.Tk) -> None:
+        for callback in root.tk.splitlist(root.tk.call("after", "info")):
+            root.after_cancel(callback)
+
+    def test_sleep_shortcut_survives_key_releases_and_activity_wakes(self) -> None:
+        try:
+            root = TkinterDnD.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+        self.addCleanup(root.destroy)
+        self.addCleanup(self._cancel_pending_callbacks, root)
+        with TemporaryDirectory() as folder, patch(
+            "app.preferences_path", return_value=Path(folder) / "preferences.json"
+        ), patch("app.piper_voice_directory", return_value=Path(folder)), patch.object(
+            DesktopAgent, "_refresh_ollama_models"
+        ), patch.object(DesktopAgent, "_begin_model_load"):
+            agent = DesktopAgent(root)
+            self.addCleanup(
+                lambda: root.after_cancel(agent.face._eye_after)
+                if agent.face._eye_after is not None else None
+            )
+            root.update()
+            for widget in (agent.prompt, agent.url_entry):
+                with self.subTest(widget=widget):
+                    widget.focus_force()
+                    root.update()
+                    widget.event_generate("<Control-Shift-KeyPress-Z>")
+                    self.assertIsNotNone(agent.face._sleep_transition_started)
+                    for key in ("z", "Shift_L", "Control_L"):
+                        widget.event_generate("<KeyRelease>", keysym=key)
+                        self.assertIsNotNone(agent.face._sleep_transition_started)
+                    widget.event_generate("<KeyPress>", keysym="x")
+                    self.assertIsNone(agent.face._sleep_transition_started)
+
+    def test_visitor_shortcut_from_prompt_and_entry(self) -> None:
+        try:
+            root = TkinterDnD.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+        self.addCleanup(root.destroy)
+        self.addCleanup(self._cancel_pending_callbacks, root)
+        with TemporaryDirectory() as folder, patch(
+            "app.preferences_path", return_value=Path(folder) / "preferences.json"
+        ), patch("app.piper_voice_directory", return_value=Path(folder)), patch.object(
+            DesktopAgent, "_refresh_ollama_models"
+        ), patch.object(DesktopAgent, "_begin_model_load"):
+            agent = DesktopAgent(root)
+            self.addCleanup(
+                lambda: root.after_cancel(agent.face._eye_after)
+                if agent.face._eye_after is not None else None
+            )
+            root.update()
+            for widget in (agent.prompt, agent.url_entry):
+                with self.subTest(widget=widget):
+                    widget.focus_force()
+                    root.update()
+                    with patch.object(agent.face, "show_next_visitor") as preview:
+                        widget.event_generate("<Control-Shift-KeyPress-A>")
+                        preview.assert_called_once_with()
+            self.assertEqual(agent.prompt.get("1.0", "end-1c"), "")
+
     def test_eye_guide_link_appears_below_title_and_opens_popup(self) -> None:
         try:
             root = TkinterDnD.Tk()

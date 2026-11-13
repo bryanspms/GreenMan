@@ -1453,7 +1453,10 @@ class DesktopAgent:
             {"role": "system", "content": self.system_prompt}
         ]
 
+        self._sleep_shortcut_releases: set[str] = set()
         self._build_ui()
+        self.root.bind("<Control-Shift-KeyPress-A>", self._show_next_visitor, add="+")
+        self.root.bind("<Control-Shift-KeyPress-Z>", self._start_sleep, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self._update_system_status()
         self._poll_speech_events()
@@ -1464,8 +1467,27 @@ class DesktopAgent:
         self._refresh_ollama_models()
         self.root.after(200, self._begin_model_load, self.active_model)
 
-    def _on_user_activity(self, _event: tk.Event) -> None:
+    def _on_user_activity(self, event: tk.Event) -> None:
+        if self._sleep_shortcut_releases and event.type == tk.EventType.KeyRelease:
+            key = event.keysym.lower()
+            if key.startswith("control_"):
+                key = "control"
+            elif key.startswith("shift_"):
+                key = "shift"
+            if key in self._sleep_shortcut_releases:
+                self._sleep_shortcut_releases.discard(key)
+                return
+        self._sleep_shortcut_releases.clear()
         self.face.note_activity()
+
+    def _show_next_visitor(self, _event: tk.Event) -> str:
+        self.face.show_next_visitor()
+        return "break"
+
+    def _start_sleep(self, _event: tk.Event) -> str:
+        self._sleep_shortcut_releases = {"z", "shift", "control"}
+        self.face.start_sleep_transition()
+        return "break"
 
     def _register_document_speech_event(self, cancel_event: Event) -> None:
         """Register a cancel_event from document reading and start face animations."""
