@@ -35,7 +35,7 @@
 - Workspace-scoped file tools, plus user-selected image attachments
 - Read, write, and inspect files within a chosen folder
 - Run shell commands with explicit approval
-- Optional spoken assistant responses with Markdown formatting support
+- Optional spoken assistant responses with Markdown formatting support and saved volume, speed, and voice-pitch settings
 - Markdown-formatted response text with bold, italic, code, headings, and blockquotes
 - Collapsible Document Reader section for efficient screen space management
 - Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows, with status cues for loading, waiting, and recording (can be turned off)
@@ -95,7 +95,8 @@ different depending on the desktop environment.
 
 ### Main window
 
-The expanded Document Reader appears between Assistant mode and the conversation.
+The main window shows the speech volume, speed, and voice pitch sliders. The
+expanded Document Reader appears between Assistant mode and the conversation.
 
 ![Green Man main window with the Document Reader expanded](assets/screenshots/main.png)
 
@@ -501,6 +502,14 @@ Use **Speech speed** below the volume slider to slow speech to 50% or speed it
 up to 200%; 100% is the voice's normal rate. The exact change depends on the
 voice and speech engine. The saved setting applies to the next spoken response
 or document-reading segment, not to audio already playing.
+Use **Voice pitch** below the speed slider to lower or raise the selected
+voice's pitch from 50% to 150%; 100% keeps the normal pitch. The setting is
+remembered and applies to the next spoken response or document-reading segment.
+The note beneath the sliders reminds you that speed and pitch changes take effect
+with the next speech segment.
+The exact result depends on the voice and engine. Adjusting pitch for Piper
+voices requires `ffmpeg` (for example, `sudo apt install ffmpeg`); at 100% it
+is not required. Piper pitch processing preserves the approximate speech speed.
 
 Untick **Green Man Animations** (beside **Read responses aloud**) to keep the face
 still and neutral: no blinking, nose twitching, glancing, sleep animation, lip

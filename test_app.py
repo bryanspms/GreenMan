@@ -49,6 +49,7 @@ from app import (
     load_user_preferences,
     load_speech_volume_preference,
     load_speech_speed_preference,
+    load_speech_pitch_preference,
     load_piper_voice_directory,
     list_piper_voice_models,
     ollama_model_capabilities,
@@ -200,6 +201,27 @@ class EyeLegendIntegrationTests(unittest.TestCase):
             self.assertEqual(agent.speech_speed, 150)
             self.assertEqual(agent.speech._speech_speed(), 150)
             self.assertEqual(load_speech_speed_preference(agent.preferences_file), 150)
+            self.assertEqual(agent.speech_pitch, 100)
+            self.assertEqual(agent.speech_pitch_scale.get(), 100)
+            self.assertGreaterEqual(
+                agent.speech_pitch_scale.winfo_rooty(),
+                agent.speech_speed_scale.winfo_rooty() + agent.speech_speed_scale.winfo_height(),
+            )
+            note = next(
+                child for child in brand_title.winfo_children()
+                if isinstance(child, tk.Label)
+                and child.cget("text") == (
+                    "* Speed and pitch changes apply to the next speech segment."
+                )
+            )
+            self.assertGreaterEqual(
+                note.winfo_rooty(),
+                agent.speech_pitch_scale.winfo_rooty() + agent.speech_pitch_scale.winfo_height(),
+            )
+            agent.speech_pitch_scale.set(125)
+            root.update()
+            self.assertEqual(agent.speech._speech_pitch(), 125)
+            self.assertEqual(load_speech_pitch_preference(agent.preferences_file), 125)
             volume_scale.set(0)
             root.update()
             self.assertEqual(agent.speech_volume, 0)
@@ -746,6 +768,34 @@ class ModelLoadingUITests(unittest.TestCase):
 
 
 class WorkspacePathTests(unittest.TestCase):
+    def test_speech_pitch_preferences_default_and_round_trip(self) -> None:
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "preferences.json"
+            self.assertEqual(load_speech_pitch_preference(path), 100)
+            for pitch in (50, 100, 150):
+                with self.subTest(pitch=pitch):
+                    self.assertIsNone(
+                        save_user_preferences(
+                            path, None, "Questions only", speech_pitch=pitch
+                        )
+                    )
+                    self.assertEqual(load_speech_pitch_preference(path), pitch)
+            for value, expected in ((1, 50), (300, 150), (True, 100), ("high", 100)):
+                path.write_text(json.dumps({"speech_pitch": value}))
+                self.assertEqual(load_speech_pitch_preference(path), expected)
+            for value in (49, 151, True, 1.5):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    save_user_preferences(path, None, "Questions only", speech_pitch=value)
+
+    def test_speech_pitch_slider_saves_current_level(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.speech_pitch_label = Mock()
+        agent._save_preferences = Mock()
+        agent._on_speech_pitch_changed("125")
+        self.assertEqual(agent.speech_pitch, 125)
+        agent.speech_pitch_label.config.assert_called_once_with(text="Voice pitch: 125%")
+        agent._save_preferences.assert_called_once()
+
     def test_speech_speed_preferences_default_and_round_trip(self) -> None:
         with TemporaryDirectory() as folder:
             path = Path(folder) / "preferences.json"

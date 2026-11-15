@@ -1,6 +1,7 @@
 import math
 import io
 import json
+import shutil
 import signal
 import struct
 import subprocess
@@ -142,6 +143,7 @@ class SpeechPlayerTests(unittest.TestCase):
                 str(Path(__file__).with_name("speech_dispatcher_helper.py")),
                 "100",
                 "100",
+                "100",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -179,6 +181,146 @@ class SpeechPlayerTests(unittest.TestCase):
                     player.speak("Hello", Event())
                 self.assertEqual(run.call_args.args[0][-2:], ["-s", expected])
 
+    def test_speech_pitch_is_passed_to_espeak(self) -> None:
+        for pitch, expected in ((50, ["-p", "25"]), (100, []), (150, ["-p", "75"])):
+            with self.subTest(pitch=pitch):
+                player = SpeechPlayer(lambda: None, pitch_provider=lambda: pitch)
+                with patch.object(
+                    player, "speech_engine", return_value=("/usr/bin/espeak-ng", ["--stdin"])
+                ), patch.object(player, "_run_process", return_value=0) as run:
+                    player.speak("Hello", Event())
+                self.assertEqual(
+                    run.call_args.args[0],
+                    ["/usr/bin/espeak-ng", "--stdin", "-a", "100", *expected],
+                )
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is not installed")
+    def test_piper_pitch_changes_frequency_without_changing_duration(self) -> None:
+        with TemporaryDirectory() as folder:
+            voice = Path(folder) / "voice.onnx"
+            for pitch in (50, 100, 150):
+                with self.subTest(pitch=pitch):
+                    player = SpeechPlayer(lambda: voice, pitch_provider=lambda: pitch)
+                    player.audio_player = Mock(return_value=("/usr/bin/aplay", []))
+                    original_run = player._run_process
+                    observed = {}
+
+                    def run(command, event, **kwargs):
+                        if "-m" not in command:
+                            return original_run(command, event, **kwargs)
+                        output = command[command.index("--output-file") + 1]
+                        with wave.open(output, "wb") as wav:
+                            wav.setnchannels(1)
+                            wav.setsampwidth(2)
+                            wav.setframerate(16000)
+                            wav.writeframes(b"".join(
+                                struct.pack("<h", round(12000 * math.sin(2 * math.pi * 440 * i / 16000)))
+                                for i in range(16000)
+                            ))
+                        return 0
+
+                    def play(command, path, event, on_started):
+                        with wave.open(str(path), "rb") as wav:
+                            observed["duration"] = wav.getnframes() / wav.getframerate()
+                            frames = wav.readframes(wav.getnframes())
+                        samples = struct.unpack(f"<{len(frames) // 2}h", frames)
+                        center = samples[4000:12000]
+                        observed["frequency"] = sum(
+                            a <= 0 < b for a, b in zip(center, center[1:])
+                        ) * 2
+                        return 0
+
+                    player._run_process = Mock(side_effect=run)
+                    player._play_piper_audio = Mock(side_effect=play)
+                    on_error = Mock()
+                    player._on_error = on_error
+                    with patch("speech.importlib.util.find_spec", return_value=object()):
+                        player.speak("Hello", Event())
+                    on_error.assert_not_called()
+                    self.assertAlmostEqual(observed["duration"], 1.0, delta=0.08)
+                    self.assertAlmostEqual(observed["frequency"], 440 * pitch / 100, delta=8)
+
+    def test_piper_pitch_reports_missing_ffmpeg(self) -> None:
+        on_error = Mock()
+        on_stop = Mock()
+        player = SpeechPlayer(
+            lambda: Path("voice"), pitch_provider=lambda: 150,
+            on_error=on_error, on_stop=on_stop,
+        )
+        player.audio_player = Mock(return_value=("/usr/bin/aplay", []))
+        event = Event()
+        with patch("speech.importlib.util.find_spec", return_value=object()), patch(
+            "speech.shutil.which", return_value=None
+        ):
+            player.speak("Hello", event)
+        on_error.assert_called_once_with(
+            "Piper pitch adjustment requires FFmpeg. Install ffmpeg.", event
+        )
+        on_stop.assert_called_once_with(event)
+
+    def test_piper_pitch_processing_failure_is_reported_and_cleaned_up(self) -> None:
+        on_error = Mock()
+        event = Event()
+        player = SpeechPlayer(lambda: Path("voice"), pitch_provider=lambda: 150, on_error=on_error)
+        player.audio_player = Mock(return_value=("/usr/bin/aplay", []))
+        player._play_piper_audio = Mock()
+        paths = []
+
+        def run(command, cancel_event, **kwargs):
+            if "-m" in command:
+                path = Path(command[command.index("--output-file") + 1])
+                paths.append(path)
+                with wave.open(str(path), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(b"\0\0")
+                return 0
+            paths.append(Path(command[-1]))
+            return 1
+
+        player._run_process = Mock(side_effect=run)
+        with patch("speech.importlib.util.find_spec", return_value=object()), patch(
+            "speech.shutil.which", return_value="/usr/bin/ffmpeg"
+        ):
+            player.speak("Hello", event)
+        on_error.assert_called_once_with("FFmpeg pitch adjustment exited with status 1.", event)
+        player._play_piper_audio.assert_not_called()
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_cancel_during_piper_pitch_processing_skips_playback(self) -> None:
+        on_error = Mock()
+        event = Event()
+        player = SpeechPlayer(lambda: Path("voice"), pitch_provider=lambda: 50, on_error=on_error)
+        player.audio_player = Mock(return_value=("/usr/bin/aplay", []))
+        player._play_piper_audio = Mock()
+        paths = []
+
+        def run(command, cancel_event, **kwargs):
+            if "-m" in command:
+                path = Path(command[command.index("--output-file") + 1])
+                paths.append(path)
+                with wave.open(str(path), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(b"\0\0")
+                return 0
+            paths.append(Path(command[-1]))
+            cancel_event.set()
+            return -15
+
+        player._run_process = Mock(side_effect=run)
+        with patch("speech.importlib.util.find_spec", return_value=object()), patch(
+            "speech.shutil.which", return_value="/usr/bin/ffmpeg"
+        ):
+            player.speak("Hello", event)
+        on_error.assert_not_called()
+        player._play_piper_audio.assert_not_called()
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all(not path.exists() for path in paths))
+
     def test_piper_speed_respects_voice_default_length_scale(self) -> None:
         with TemporaryDirectory() as folder:
             voice = Path(folder) / "voice.onnx"
@@ -209,7 +351,35 @@ class SpeechPlayerTests(unittest.TestCase):
         process.wait.return_value = 0
         with patch("speech.subprocess.Popen", return_value=process) as popen:
             player._speak_with_dispatcher("Hello", Event())
+        self.assertEqual(popen.call_args.args[0][-2:], ["150", "100"])
+
+    def test_speech_pitch_is_passed_to_dispatcher(self) -> None:
+        player = SpeechPlayer(lambda: None, pitch_provider=lambda: 150)
+        process = Mock()
+        process.stdin = io.StringIO()
+        process.stdout = io.StringIO("")
+        process.wait.return_value = 0
+        with patch("speech.subprocess.Popen", return_value=process) as popen:
+            player._speak_with_dispatcher("Hello", Event())
         self.assertEqual(popen.call_args.args[0][-1], "150")
+
+    def test_dispatcher_maps_pitch_to_valid_range(self) -> None:
+        for pitch, expected in ((50, -100), (100, 0), (150, 100)):
+            with self.subTest(pitch=pitch):
+                client = Mock()
+                client.speak.side_effect = lambda text, callback: callback("end")
+                speechd = SimpleNamespace(
+                    SSIPClient=Mock(return_value=client),
+                    SSIPError=type("SSIPError", (Exception,), {}),
+                    SSIPResponseError=type("SSIPResponseError", (Exception,), {}),
+                )
+                with patch.dict(sys.modules, {"speechd": speechd}), patch.object(
+                    sys, "argv", ["speech_dispatcher_helper.py", "100", "100", str(pitch)]
+                ), patch.object(sys, "stdin", io.StringIO("Hello")), patch(
+                    "speech_dispatcher_helper.signal.signal"
+                ):
+                    self.assertEqual(speech_dispatcher_helper.main(), 0)
+                client.set_pitch.assert_called_once_with(expected)
 
     def test_dispatcher_maps_speed_to_valid_rate(self) -> None:
         for speed, expected in ((50, -100), (100, 0), (200, 100)):

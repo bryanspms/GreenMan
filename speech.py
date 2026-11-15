@@ -95,6 +95,7 @@ class SpeechPlayer:
         on_resume: Callable[[Event], None] | None = None,
         volume_provider: Callable[[], int] | None = None,
         speed_provider: Callable[[], int] | None = None,
+        pitch_provider: Callable[[], int] | None = None,
     ) -> None:
         self._voice_model_provider = voice_model_provider
         self._on_start = on_start
@@ -104,6 +105,7 @@ class SpeechPlayer:
         self._on_resume = on_resume
         self._volume_provider = volume_provider or (lambda: 100)
         self._speed_provider = speed_provider or (lambda: 100)
+        self._pitch_provider = pitch_provider or (lambda: 100)
         self.process: subprocess.Popen | None = None
         self.process_lock = Lock()
         self._playback_lock = Lock()
@@ -178,6 +180,8 @@ class SpeechPlayer:
                     "Piper needs an audio player. Install pw-play, paplay, "
                     "aplay, or ffplay."
                 )
+            if self._speech_pitch() != 100 and not shutil.which("ffmpeg"):
+                return "Piper pitch adjustment requires FFmpeg. Install ffmpeg."
             return None
         if not self.speech_engine():
             return NO_SPEECH_ENGINE_MESSAGE
@@ -204,6 +208,9 @@ class SpeechPlayer:
             speed = self._speech_speed()
             if speed != 100:
                 arguments += ["-s", str(round(175 * speed / 100))]
+            pitch = self._speech_pitch()
+            if pitch != 100:
+                arguments += ["-p", str(round(pitch / 2))]
             result = self._run_process(
                 [executable, *arguments],
                 cancel_event,
@@ -263,6 +270,9 @@ class SpeechPlayer:
 
     def _speech_speed(self) -> int:
         return max(50, min(200, self._speed_provider()))
+
+    def _speech_pitch(self) -> int:
+        return max(50, min(150, self._pitch_provider()))
 
     def _play_piper_audio(
         self,
@@ -417,6 +427,7 @@ class SpeechPlayer:
                 str(Path(__file__).with_name("speech_dispatcher_helper.py")),
                 str(self._speech_volume()),
                 str(self._speech_speed()),
+                str(self._speech_pitch()),
             ],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
         )
@@ -485,7 +496,14 @@ class SpeechPlayer:
                 or "Piper speech dependencies are unavailable."
             )
         temporary_path: str | None = None
+        pitched_path: str | None = None
         try:
+            pitch = self._speech_pitch()
+            ffmpeg = shutil.which("ffmpeg") if pitch != 100 else None
+            if pitch != 100 and ffmpeg is None:
+                raise FileNotFoundError(
+                    "Piper pitch adjustment requires FFmpeg. Install ffmpeg."
+                )
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as output:
                 temporary_path = output.name
             command = [
@@ -526,17 +544,40 @@ class SpeechPlayer:
                 return
             if result:
                 raise RuntimeError(f"Piper exited with status {result}.")
+            playback_path = Path(temporary_path)
+            if ffmpeg is not None:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as output:
+                    pitched_path = output.name
+                with wave.open(str(playback_path), "rb") as source:
+                    sample_rate = source.getframerate()
+                factor = pitch / 100
+                result = self._run_process(
+                    [
+                        ffmpeg, "-nostdin", "-loglevel", "error", "-y",
+                        "-i", str(playback_path), "-af",
+                        f"asetrate={sample_rate}*{factor},"
+                        f"aresample={sample_rate},atempo={1 / factor}",
+                        "-c:a", "pcm_s16le", pitched_path,
+                    ],
+                    cancel_event,
+                    discard_stdout=True,
+                )
+                if cancel_event.is_set():
+                    return
+                if result:
+                    raise RuntimeError(f"FFmpeg pitch adjustment exited with status {result}.")
+                playback_path = Path(pitched_path)
             player_executable, player_arguments = player
             try:
                 envelope, window_seconds = compute_speech_envelope(
-                    Path(temporary_path)
+                    playback_path
                 )
             except (OSError, ValueError, EOFError, wave.Error):
                 envelope, window_seconds = None, 0.04
             input_name = "pipe:0" if Path(player_executable).name == "ffplay" else "-"
             result = self._play_piper_audio(
                 [player_executable, *player_arguments, input_name],
-                Path(temporary_path),
+                playback_path,
                 cancel_event,
                 on_started=lambda: self._notify_start(
                     envelope, window_seconds, cancel_event
@@ -547,7 +588,5 @@ class SpeechPlayer:
         finally:
             if temporary_path is not None:
                 Path(temporary_path).unlink(missing_ok=True)
-            # Signal that this speech chunk has completed
-            if self._on_stop is not None:
-                self._on_stop(cancel_event)
-            cancel_event.set()
+            if pitched_path is not None:
+                Path(pitched_path).unlink(missing_ok=True)
