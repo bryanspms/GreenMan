@@ -355,7 +355,45 @@ DESKTOP_ACTIONS = {
 DESKTOP_COORDINATE_ACTIONS = {"click", "focus_window", "close_window"}
 MAX_FILE_BYTES = 1_000_000
 MAX_IMAGE_BYTES = 10_000_000
-IMAGE_CONTEXT_TOKENS = 16384
+IMAGE_CONTEXT_TOKENS = 4096
+IMAGE_CONTEXT_OPTIONS = (2048, 4096, 8192, 16384, 32768)
+GREENMAN_IMAGE_CONTEXT_ENV_VAR = "GREENMAN_IMAGE_CONTEXT_TOKENS"
+
+
+def resolve_image_context_tokens(value=None) -> int:
+    """Return a valid image num_ctx, preferring explicit value, then env."""
+    candidates = []
+    if value is not None:
+        candidates.append(value)
+    env_value = os.environ.get(GREENMAN_IMAGE_CONTEXT_ENV_VAR)
+    if env_value is not None:
+        candidates.append(env_value)
+    for candidate in candidates:
+        try:
+            number = int(str(candidate).strip())
+        except (TypeError, ValueError):
+            continue
+        if number in IMAGE_CONTEXT_OPTIONS:
+            return number
+    return IMAGE_CONTEXT_TOKENS
+
+
+def load_image_context_preference(path: Path) -> int:
+    """Load saved image num_ctx without breaking old preference files."""
+    try:
+        preferences = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return resolve_image_context_tokens()
+    if not isinstance(preferences, dict):
+        return resolve_image_context_tokens()
+    saved = preferences.get("image_context_tokens", preferences.get("image_num_ctx"))
+    if saved is None:
+        return resolve_image_context_tokens()
+    resolved = resolve_image_context_tokens(saved)
+    # If the saved value was invalid, still allow env override.
+    if str(saved).strip() != str(resolved):
+        return resolve_image_context_tokens()
+    return resolved
 IMAGE_RESPONSE_TOKENS = 4096
 TOOL_CALL_RESPONSE_TOKENS = 2048
 IMAGE_TOOL_CALL_RESPONSE_TOKENS = 1024
@@ -894,6 +932,7 @@ def save_user_preferences(
     speech_volume: int = 100,
     speech_speed: int = 100,
     speech_pitch: int = 100,
+    image_context_tokens: int = IMAGE_CONTEXT_TOKENS,
 ) -> str | None:
     if mode not in TOOL_MODES:
         raise ValueError(f"Unknown assistant mode: {mode}")
@@ -919,6 +958,7 @@ def save_user_preferences(
         raise ValueError("Speech pitch must be an integer.")
     if not 50 <= speech_pitch <= 150:
         raise ValueError("Speech pitch must be between 50 and 150.")
+    image_context_tokens = resolve_image_context_tokens(image_context_tokens)
     if workspace is not None and not is_valid_workspace(workspace):
         workspace = None
     preferences = {
@@ -933,6 +973,7 @@ def save_user_preferences(
         "speech_volume": speech_volume,
         "speech_speed": speech_speed,
         "speech_pitch": speech_pitch,
+        "image_context_tokens": image_context_tokens,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1460,6 +1501,7 @@ class DesktopAgent:
         self.speech_volume = load_speech_volume_preference(self.preferences_file)
         self.speech_speed = load_speech_speed_preference(self.preferences_file)
         self.speech_pitch = load_speech_pitch_preference(self.preferences_file)
+        self.image_context_tokens = load_image_context_preference(self.preferences_file)
         self.voice_choice = tk.StringVar(
             value=(
                 self.voice_model_path.name
@@ -1663,6 +1705,7 @@ class DesktopAgent:
         self.face.stop_speaking()
         # Clear the document reading event so we stop matching document reading events
         self._document_reading_cancel_event = None
+        self._update_send_button()
 
     def _stop_speech(self) -> None:
         self.speech.stop()
@@ -1872,6 +1915,17 @@ class DesktopAgent:
         self.url_entry.insert(0, "http://127.0.0.1:11434")
         self.url_entry.grid(row=1, column=1, sticky=tk.EW, padx=6, pady=1)
         self.url_entry.bind("<FocusOut>", self._on_ollama_url_changed)
+        tk.Label(settings, text="Image context").grid(row=2, column=0, sticky=tk.W)
+        self.image_context_choice = tk.StringVar(value=str(self.image_context_tokens))
+        self.image_context_selector = ttk.Combobox(
+            settings,
+            textvariable=self.image_context_choice,
+            values=[str(option) for option in IMAGE_CONTEXT_OPTIONS],
+            state="readonly",
+            width=18,
+        )
+        self.image_context_selector.grid(row=2, column=1, sticky=tk.EW, padx=6, pady=1)
+        self.image_context_selector.bind("<<ComboboxSelected>>", self._on_image_context_selected)
 
         #folder_row = tk.Frame(self.root, padx=10, pady=(0, 8))
         #folder_row.pack(fill=tk.X)
@@ -2039,6 +2093,7 @@ class DesktopAgent:
             on_word_highlight=self._highlight_word_in_transcript,
             on_reading_finished=self._stop_document_reading,
             on_speech_actually_started=self._on_document_speech_actually_started,
+            on_reading_started=self._update_send_button,
         )
         self.document_reader_ui.pack(fill=tk.X, padx=0, pady=(4, 4))
 
@@ -2280,6 +2335,13 @@ class DesktopAgent:
             self._save_preferences()
             self._update_send_button()
 
+    def _on_image_context_selected(self, _event: tk.Event | None = None) -> None:
+        selected = resolve_image_context_tokens(self.image_context_choice.get())
+        self.image_context_tokens = selected
+        self.image_context_choice.set(str(selected))
+        self.status.set(f"Image context set to {selected} tokens for future image requests.")
+        self._save_preferences()
+
     def _save_preferences(self) -> None:
         error = save_user_preferences(
             self.preferences_file,
@@ -2294,6 +2356,7 @@ class DesktopAgent:
             self.speech_volume,
             self.speech_speed,
             self.speech_pitch,
+            getattr(self, "image_context_tokens", IMAGE_CONTEXT_TOKENS),
         )
         if error:
             self.status.set(error)
@@ -2430,6 +2493,7 @@ class DesktopAgent:
                 self.speech_volume,
                 self.speech_speed,
                 self.speech_pitch,
+                getattr(self, "image_context_tokens", IMAGE_CONTEXT_TOKENS),
             )
             if error:
                 self.status.set(error)
@@ -2772,7 +2836,12 @@ class DesktopAgent:
                 disabledforeground=THEME_COLORS["text"],
             )
             return
-        enabled = is_valid_workspace(self.workspace) and not self.busy
+        reader = getattr(self, "document_reader_ui", None)
+        enabled = (
+            is_valid_workspace(self.workspace)
+            and not self.busy
+            and not (reader is not None and reader.is_reading)
+        )
         self.send_button.config(
             text="Send",
             command=self._on_send_button,
@@ -3238,6 +3307,10 @@ class DesktopAgent:
 
     def _send(self) -> None:
         if self.busy:
+            return
+        reader = getattr(self, "document_reader_ui", None)
+        if reader is not None and reader.is_reading:
+            self.status.set("Stop document reading before sending a message.")
             return
         if getattr(self, "is_listening", False) or getattr(
             self, "listening_event", None
@@ -4389,7 +4462,7 @@ class DesktopAgent:
         if model in QWEN_VL_MODELS and has_images:
             payload_data["think"] = False
             payload_data["options"] = {
-                "num_ctx": IMAGE_CONTEXT_TOKENS,
+                "num_ctx": getattr(self, "image_context_tokens", IMAGE_CONTEXT_TOKENS),
                 "num_predict": (
                     IMAGE_TOOL_CALL_RESPONSE_TOKENS if tools else IMAGE_RESPONSE_TOKENS
                 ),

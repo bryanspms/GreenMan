@@ -389,7 +389,8 @@ it, shows "Loading ..." in the status line, and says "Ready" when it is loaded
 loads.
 If the model list cannot be retrieved, the status line reports the error and the
 current selection is retained. The list is not a request to download models;
-install them separately with Ollama.
+install them separately with Ollama. If Ollama was stopped when Green Man
+started, start Ollama and reopen the model dropdown to refresh the list.
 
 The bottom of the window shows CPU temperature and utilization and GPU
 utilization when available, updating continuously. Elapsed time counts
@@ -447,6 +448,10 @@ Chat responses support **Markdown formatting** for better readability. The respo
 When responses are **read aloud**, Markdown formatting syntax is automatically stripped to produce clean, natural speech without reading special characters. The formatted display is preserved in the response text area while the voice hears only the plain content.
 
 You can also **collapse the Document Reader** section to save screen space by clicking the collapse button (▼) in the Document Reader header. The collapse state is remembered between sessions.
+Use **Previous Chunk** and **Next Chunk** to stop the current speech and begin
+reading the adjacent chunk. The buttons are disabled at the beginning and end
+of the document, respectively. **Send** is disabled while reading, including
+when paused; stop or finish reading before sending a message.
 
 ### <span style="color: #2f6b3f;">Animated face</span>
 
@@ -540,9 +545,16 @@ Desktop control advances one tool call per model response. Visual actions are
 followed by a fresh screenshot; window launches and title-based closes are
 checked with window listings. Speed depends on the model running on a GPU.
 Check with `ollama ps`: the PROCESSOR column should show GPU, not `100% CPU`.
-For Qwen3-VL, image requests use a 16,384-token context, and tool-call replies
-that include an image are capped at 1,024 tokens to keep memory use and runaway
-replies down.
+The **Image context** dropdown selects the context size for image requests to
+Green Man's configured Qwen model variants (including attached images and
+screenshots). The default is 16,384 tokens; the choice is saved locally, takes
+effect for subsequent image requests immediately, and is restored on restart.
+Smaller values may reduce memory use, but leave less room for image and text
+context. The `GREENMAN_IMAGE_CONTEXT_TOKENS` environment variable sets the
+default when no valid choice is saved; accepted values are 2048, 4096, 8192,
+16384, and 32768. Tool-call replies that include an image are capped at 1,024
+tokens to keep memory use and runaway replies down. Other models and text-only
+requests do not use this image-specific context setting.
 
 On older NVIDIA cards (for example Pascal, such as a GTX 1070), a recent Ollama
 may pick its CUDA 13 backend, which does not support them, and silently fall back

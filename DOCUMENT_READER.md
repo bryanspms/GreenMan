@@ -26,6 +26,8 @@ The Document Reader feature allows Green Man to read documents and books aloud w
 - **⏸ Pause** - Pause the current reading session
 - **▶ Resume** - Resume reading after pause
 - **⏹ Stop** - Stop reading completely
+- **Previous Chunk** / **Next Chunk** - Stop current speech and start the adjacent chunk; unavailable at the document boundaries
+- **Send** is disabled while reading, including during a pause, and becomes available again when reading stops or finishes if other send requirements are met.
 
 ### 3. Progress Tracking
 - Real-time progress bar showing reading progress
@@ -57,6 +59,7 @@ The reader can split documents into chunks using three strategies:
 6. **Control Playback**:
    - Use "⏸ Pause" to pause and "▶ Resume" to continue
    - Use "⏹ Stop" to stop reading completely
+   - Use "Previous Chunk" or "Next Chunk" to jump to and read an adjacent chunk
 7. **Track Progress** - Watch the progress bar and chunk counter
 
 ### Keyboard Shortcuts

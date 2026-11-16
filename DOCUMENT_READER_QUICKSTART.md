@@ -45,8 +45,12 @@ Click **▶ Start Reading** to begin listening to your document.
 | **⏸ Pause** | Pause the current reading |
 | **▶ Resume** | Continue after pausing |
 | **⏹ Stop** | Stop reading completely |
+| **Previous Chunk** | Stop speech and read the previous chunk |
+| **Next Chunk** | Stop speech and read the next chunk |
 
-The progress bar shows your position in the document.
+The progress bar shows your position in the document. Navigation buttons are
+disabled when there is no previous or next chunk. The main **Send** button is
+disabled until reading stops or finishes, including while reading is paused.
 
 ## Advanced Features
 
@@ -141,7 +145,7 @@ A: Not yet, but this is planned for a future version.
 A: No, OCR support is not yet implemented. Scanned PDFs won't be readable.
 
 **Q: Can I skip ahead or rewind?**
-A: Currently, the reader progresses sequentially through chunks. You can pause/resume or use stop/start.
+A: Use **Previous Chunk** and **Next Chunk** to move between adjacent chunks.
 
 ## Voice Quality
 

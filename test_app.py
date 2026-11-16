@@ -19,6 +19,7 @@ from tkinterdnd2 import TkinterDnD
 from app import (
     DEFAULT_MODEL,
     IMAGE_DROP_HINT,
+    IMAGE_CONTEXT_OPTIONS,
     IMAGE_CONTEXT_TOKENS,
     IMAGE_RESPONSE_TOKENS,
     IMAGE_TOOL_CALL_RESPONSE_TOKENS,
@@ -47,6 +48,7 @@ from app import (
     local_ollama_url,
     split_request_steps,
     load_user_preferences,
+    load_image_context_preference,
     load_speech_volume_preference,
     load_speech_speed_preference,
     load_speech_pitch_preference,
@@ -619,6 +621,32 @@ class VoiceDirectoryUITests(unittest.TestCase):
 
 
 class ModelLoadingUITests(unittest.TestCase):
+    def test_image_context_restores_on_startup_when_ollama_is_offline(self) -> None:
+        try:
+            root = TkinterDnD.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"No display available: {error}")
+
+        def cleanup() -> None:
+            for callback in root.tk.splitlist(root.tk.call("after", "info")):
+                root.after_cancel(callback)
+            root.destroy()
+
+        self.addCleanup(cleanup)
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "preferences.json"
+            self.assertIsNone(
+                save_user_preferences(path, None, "Questions only", image_context_tokens=4096)
+            )
+            with patch("app.preferences_path", return_value=path), patch(
+                "app.piper_voice_directory", return_value=Path(folder)
+            ), patch.object(DesktopAgent, "_refresh_ollama_models"), patch.object(
+                DesktopAgent, "_begin_model_load"
+            ):
+                agent = DesktopAgent(root)
+                self.assertEqual(agent.image_context_tokens, 4096)
+                self.assertEqual(agent.image_context_choice.get(), "4096")
+
     def test_installed_models_populate_and_select_in_the_dropdown(self) -> None:
         try:
             root = TkinterDnD.Tk()
@@ -768,6 +796,66 @@ class ModelLoadingUITests(unittest.TestCase):
 
 
 class WorkspacePathTests(unittest.TestCase):
+    def test_image_context_preference_defaults_and_round_trips(self) -> None:
+        with TemporaryDirectory() as folder, patch.dict(
+            "os.environ", {"GREENMAN_IMAGE_CONTEXT_TOKENS": "4096"}
+        ):
+            path = Path(folder) / "preferences.json"
+            self.assertEqual(load_image_context_preference(path), 4096)
+            path.write_text("{}")
+            self.assertEqual(load_image_context_preference(path), 4096)
+            for value in IMAGE_CONTEXT_OPTIONS:
+                with self.subTest(value=value):
+                    self.assertIsNone(
+                        save_user_preferences(
+                            path, None, "Questions only", image_context_tokens=value
+                        )
+                    )
+                    self.assertEqual(load_image_context_preference(path), value)
+            path.write_text('{"image_context_tokens": "invalid"}')
+            self.assertEqual(load_image_context_preference(path), 4096)
+            with patch.dict("os.environ", {"GREENMAN_IMAGE_CONTEXT_TOKENS": "invalid"}):
+                self.assertEqual(load_image_context_preference(path), IMAGE_CONTEXT_TOKENS)
+
+    def test_image_context_selection_is_saved_and_used_immediately_and_after_restart(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as folder:
+            agent = DesktopAgent.__new__(DesktopAgent)
+            agent.preferences_file = Path(folder) / "preferences.json"
+            agent.workspace = None
+            agent.tool_mode = Mock(get=Mock(return_value="Questions only"))
+            agent.active_model = "qwen3-vl:8b"
+            agent.voice_enabled = Mock(get=Mock(return_value=False))
+            agent.voice_model_path = None
+            agent.system_prompt = SYSTEM_PROMPT
+            agent.animations_enabled = Mock(get=Mock(return_value=True))
+            agent.piper_voice_directory = None
+            agent.speech_volume = agent.speech_speed = agent.speech_pitch = 100
+            agent.image_context_tokens = IMAGE_CONTEXT_TOKENS
+            agent.image_context_choice = Mock(get=Mock(return_value="4096"))
+            agent.status = Mock()
+            agent.active_response_lock = Lock()
+            agent.active_response = None
+            agent.messages = [
+                {"role": "user", "content": "Describe this image.", "images": ["aGVsbG8="]}
+            ]
+
+            agent._on_image_context_selected()
+            self.assertEqual(agent.image_context_tokens, 4096)
+            restored_context = load_image_context_preference(agent.preferences_file)
+            self.assertEqual(restored_context, 4096)
+
+            for context in (agent.image_context_tokens, restored_context):
+                with self.subTest(context=context), patch("app.urlopen") as urlopen:
+                    agent.image_context_tokens = context
+                    urlopen.return_value.__enter__.return_value.read.return_value = (
+                        b'{"message":{"role":"assistant","content":"A test image."}}'
+                    )
+                    agent._chat("http://localhost:11434/api/chat", "qwen3-vl:8b", tools=[])
+                    payload = json.loads(urlopen.call_args.args[0].data)
+                    self.assertEqual(payload["options"]["num_ctx"], 4096)
+
     def test_speech_pitch_preferences_default_and_round_trip(self) -> None:
         with TemporaryDirectory() as folder:
             path = Path(folder) / "preferences.json"
@@ -1591,6 +1679,30 @@ class ToolCallResponseTests(unittest.TestCase):
                 list_ollama_models("http://127.0.0.1:11434")
         with self.assertRaises(ValueError):
             list_ollama_models("http://example.com")
+
+    def test_model_list_recovers_after_ollama_becomes_available(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent.root = Mock()
+        agent.url_entry = Mock(get=Mock(return_value="http://localhost:11434"))
+        agent.model_selector = Mock()
+        agent.status = Mock()
+        agent.model_list_url = None
+
+        with patch("app.list_ollama_models", side_effect=[
+            RuntimeError("connection refused"), ["qwen3-vl:4b", "qwen3-vl:8b"]
+        ]):
+            for request_id in (1, 2):
+                agent.model_list_request_id = request_id
+                agent._list_ollama_models_in_background("http://localhost:11434", request_id)
+                _, callback, *args = agent.root.after.call_args.args
+                callback(*args)
+
+        agent.status.set.assert_called_once_with(
+            "Could not refresh the Ollama model list: connection refused"
+        )
+        agent.model_selector.config.assert_called_once_with(
+            values=["qwen3-vl:4b", "qwen3-vl:8b"]
+        )
 
     def test_model_list_ignores_stale_results_and_reports_errors(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)
