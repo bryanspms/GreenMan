@@ -30,6 +30,7 @@ from gnome_shell_windows import GnomeShellWindows
 from window_accessibility import AccessibleWindow, AccessibleWindowController
 from document_reader_ui import DocumentReaderUI
 from markdown_text_widget import MarkdownText, strip_markdown
+from tic_tac_toe import TicTacToeDialog
 
 
 IMAGE_DROP_HINT = "Drop a PNG, JPEG, or WebP image onto the message box to attach it."
@@ -1881,7 +1882,7 @@ class DesktopAgent:
         tk.Label(
             brand_title,
             text="* Speed and pitch changes apply to the next speech segment.",
-            font=("TkDefaultFont", 8),
+            font=("TkDefaultFont", 7, "bold"),
             fg=THEME_COLORS["muted_text"],
             bg=brand_title.cget("bg"),
             wraplength=160,
@@ -2219,8 +2220,19 @@ class DesktopAgent:
         self.system_status = tk.StringVar(value="")
         status_row = tk.Frame(self.root, padx=10, pady=5)
         status_row.pack(side=tk.BOTTOM, fill=tk.X, before=attachment_row)
-        tk.Label(status_row, textvariable=self.status, anchor=tk.W).pack(fill=tk.X)
-        tk.Label(status_row, textvariable=self.system_status, anchor=tk.W).pack(fill=tk.X)
+        self.play_game_button = tk.Button(
+            status_row,
+            text="Play game",
+            command=self._open_game,
+            bg=THEME_COLORS["surface"],
+            fg=THEME_COLORS["text"],
+            activebackground=THEME_COLORS["green_selected"],
+        )
+        self.play_game_button.pack(side=tk.RIGHT, anchor=tk.N)
+        status_text = tk.Frame(status_row)
+        status_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(status_text, textvariable=self.status, anchor=tk.W).pack(fill=tk.X)
+        tk.Label(status_text, textvariable=self.system_status, anchor=tk.W).pack(fill=tk.X)
         self.working_indicator = tk.Canvas(
             input_column,
             height=18,
@@ -2823,6 +2835,9 @@ class DesktopAgent:
         self.status.set("Could not read the response aloud.")
 
     def _update_send_button(self) -> None:
+        play_game_button = getattr(self, "play_game_button", None)
+        if play_game_button is not None:
+            play_game_button.config(state=tk.DISABLED if self.busy else tk.NORMAL)
         cancel_event = getattr(self, "cancel_event", None)
         if cancel_event is not None:
             stopping = cancel_event.is_set()
@@ -2858,6 +2873,10 @@ class DesktopAgent:
             self._stop_query()
             return
         self._send()
+
+    def _open_game(self) -> None:
+        if not self.busy:
+            TicTacToeDialog(self.root, THEME_COLORS)
 
     def _stop_query(self) -> None:
         if self.cancel_event is None or self.cancel_event.is_set():

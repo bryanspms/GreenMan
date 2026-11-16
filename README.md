@@ -38,6 +38,7 @@
 - Optional spoken assistant responses with Markdown formatting support and saved volume, speed, and voice-pitch settings
 - Markdown-formatted response text with bold, italic, code, headings, and blockquotes
 - Collapsible Document Reader section for efficient screen space management
+- Offline tic-tac-toe against Green Man
 - Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows, with status cues for loading, waiting, and recording (can be turned off)
 - Optional spoken "Ready" after the Ollama model loads, including at startup
 - Current-step highlighting for multi-line Desktop control requests
@@ -448,6 +449,11 @@ Chat responses support **Markdown formatting** for better readability. The respo
 When responses are **read aloud**, Markdown formatting syntax is automatically stripped to produce clean, natural speech without reading special characters. The formatted display is preserved in the response text area while the voice hears only the plain content.
 
 You can also **collapse the Document Reader** section to save screen space by clicking the collapse button (▼) in the Document Reader header. The collapse state is remembered between sessions.
+Select **Play game** below **Clear image** to play tic-tac-toe against Green Man.
+You play X and move first against an unbeatable built-in opponent; **New game**
+starts another round, and **Close** or Escape returns to the main window. The
+game does not need Ollama. The button is disabled during model loading and
+active chat requests.
 Use **Previous Chunk** and **Next Chunk** to stop the current speech and begin
 reading the adjacent chunk. The buttons are disabled at the beginning and end
 of the document, respectively. **Send** is disabled while reading, including
