@@ -46,6 +46,9 @@
 - Support for both X11 and Wayland sessions
 - Persistent local preferences for model, mode, workspace, voice setting, and face animations
 
+The standalone Pong game is separate from Green Man. See the [Pong guide](./pong.md)
+for installation, controls, rules, and tests.
+
 [Back to TOC](#table-of-contents)
 
 ## <span style="color: #2f6b3f;">Architecture</span>
@@ -270,6 +273,21 @@ window through accessibility and uses a keyboard shortcut to close it. GNOME
 Wayland may refuse accessibility activation, so title-based activation and
 closing may not work without the extension.
 
+After updating an existing installation, copy the updated `extension.js` into
+the installed extension directory and reload the extension. GNOME may cache
+the old JavaScript module until you log out and back in:
+
+```bash
+cp gnome_extension/greenman-windows@greenman.local/extension.js ~/.local/share/gnome-shell/extensions/greenman-windows@greenman.local/extension.js
+gnome-extensions disable greenman-windows@greenman.local
+sleep 2
+gnome-extensions enable greenman-windows@greenman.local
+```
+
+The opt-in **AI Pong study** requires this updated helper to check the Pong
+process and keyboard focus. See [pong.md](./pong.md#desktop-control-experiments)
+for setup and limitations.
+
 [Back to TOC](#table-of-contents)
 
 ## <span style="color: #2f6b3f;">Microphone Dictation</span>
@@ -449,10 +467,12 @@ Chat responses support **Markdown formatting** for better readability. The respo
 When responses are **read aloud**, Markdown formatting syntax is automatically stripped to produce clean, natural speech without reading special characters. The formatted display is preserved in the response text area while the voice hears only the plain content.
 
 You can also **collapse the Document Reader** section to save screen space by clicking the collapse button (▼) in the Document Reader header. The collapse state is remembered between sessions.
-Select **Play game** below **Clear image** to play tic-tac-toe against Green Man.
-You play X and move first against an unbeatable built-in opponent; **New game**
-starts another round, and **Close** or Escape returns to the main window. The
-game does not need Ollama. The button is disabled during model loading and
+Use the **Play game** dropdown below **Clear image** to launch **Tic-Tac-Toe**
+or **Pong**; it resets to **None** after each selection. Tic-Tac-Toe opens a
+modal window: you play X against a built-in opponent, with **New game** and
+**Close** controls. Pong opens separately and requires the optional Pygame
+package in Green Man's Python environment; see the [Pong guide](./pong.md).
+Neither game needs Ollama. The dropdown is disabled during model loading and
 active chat requests.
 Use **Previous Chunk** and **Next Chunk** to stop the current speech and begin
 reading the adjacent chunk. The buttons are disabled at the beginning and end
@@ -549,7 +569,11 @@ a steady rhythm instead. If the mouth seems ahead of or behind the voice, adjust
 
 Desktop control advances one tool call per model response. Visual actions are
 followed by a fresh screenshot; window launches and title-based closes are
-checked with window listings. Speed depends on the model running on a GPU.
+checked with window listings. The `press_key` tool can request a hold of 0.02
+to 2 seconds instead of a short tap; desktop action approval still applies.
+Input goes to the currently focused window. Ordinary Desktop control is not a
+continuous game-playing mode and remains subject to its tool-round limit. The
+separately enabled AI Pong study uses its own loop. Speed depends on the model running on a GPU.
 Check with `ollama ps`: the PROCESSOR column should show GPU, not `100% CPU`.
 The **Image context** dropdown selects the context size for image requests to
 Green Man's configured Qwen model variants (including attached images and

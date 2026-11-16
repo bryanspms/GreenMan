@@ -184,6 +184,7 @@ class WaylandDesktopPortal:
         self._stream_id: int | None = None
         self._target_object: str | None = None
         self._logical_size: tuple[int, int] | None = None
+        self._stream_position: tuple[int, int] | None = None
         self._image_size: tuple[int, int] | None = None
         self._thread.start()
         self._ready.wait()
@@ -354,6 +355,7 @@ class WaylandDesktopPortal:
             if self._target_object is None:
                 self._target_object = pipewire_serial_for_node(node_id)
             self._logical_size = properties.get("size")
+            self._stream_position = properties.get("position")
             pipewire_result = await self._call(
                 PIPEWIRE_INTERFACE,
                 "OpenPipeWireRemote",
@@ -381,6 +383,7 @@ class WaylandDesktopPortal:
         self._stream_id = None
         self._target_object = None
         self._logical_size = None
+        self._stream_position = None
         self._image_size = None
         if self._session_handle is not None and self._bus is not None:
             session_handle = self._session_handle
@@ -464,6 +467,11 @@ class WaylandDesktopPortal:
         image = self._capture_png()
         return base64.b64encode(image).decode("ascii")
 
+    def screenshot_stream_geometry(
+        self,
+    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+        return self._stream_position, self._logical_size
+
     async def _move_pointer(self, x: int, y: int) -> None:
         assert self._session_handle is not None and self._stream_id is not None
         assert self._image_size is not None
@@ -515,11 +523,17 @@ class WaylandDesktopPortal:
     def close_focused_window(self) -> None:
         self._submit(self._close_focused_window())
 
-    def press_keys(self, chord: str) -> None:
+    def press_keys(
+        self, chord: str, duration: float = 0.02,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         modifiers, key = keycodes_for_chord(chord)
-        self._submit(self._press_keys(modifiers, key))
+        self._submit(self._press_keys(modifiers, key, duration, cancel_event))
 
-    async def _press_keys(self, modifiers: list[int], key: int) -> None:
+    async def _press_keys(
+        self, modifiers: list[int], key: int, duration: float = 0.02,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         await self._ensure_session(allow_input=True)
         if not self._granted_devices & KEYBOARD_DEVICE:
             raise RuntimeError(
@@ -541,9 +555,18 @@ class WaylandDesktopPortal:
 
         try:
             for code in [*modifiers, key]:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 await notify(code, 1)
                 pressed.append(code)
-            await asyncio.sleep(0.02)
+            deadline = asyncio.get_running_loop().time() + duration
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.02, remaining))
         finally:
             for code in reversed(pressed):
                 await notify(code, 0)

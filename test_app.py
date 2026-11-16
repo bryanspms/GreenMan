@@ -30,6 +30,7 @@ from app import (
     MAX_IMAGE_BYTES,
     SYSTEM_PROMPT,
     DesktopAgent,
+    QueryCancelled,
     TOOL_MODES,
     calculate_cpu_utilization,
     format_elapsed_timer,
@@ -4331,6 +4332,68 @@ class DesktopSafetyTests(unittest.TestCase):
         result, images = agent._execute_tool("click", {"x": 10, "y": 20})
         self.assertIn("take a fresh screenshot", result)
         self.assertIsNone(images)
+
+    def test_key_hold_is_approved_and_sent_to_wayland(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent._request_approval = Mock(return_value=True)
+        agent.wayland_desktop = Mock()
+        agent.cancel_event = Event()
+        result, _ = agent._execute_tool(
+            "press_key", {"keys": "i", "duration_seconds": 0.5}
+        )
+        agent._request_approval.assert_called_once_with(
+            "press_key", {"keys": "i", "duration_seconds": 0.5}
+        )
+        agent.wayland_desktop.press_keys.assert_called_once_with(
+            "i", 0.5, agent.cancel_event
+        )
+        self.assertIn("screenshot must confirm", result)
+
+    def test_key_press_without_duration_keeps_existing_wayland_call(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent._request_approval = Mock(return_value=True)
+        agent.wayland_desktop = Mock()
+        agent._execute_tool("press_key", {"keys": "enter"})
+        agent.wayland_desktop.press_keys.assert_called_once_with("enter")
+
+    def test_invalid_key_hold_is_rejected_before_approval(self) -> None:
+        for duration in (-1, 0, 3, float("nan"), True, "0.5"):
+            with self.subTest(duration=duration):
+                agent = DesktopAgent.__new__(DesktopAgent)
+                agent._request_approval = Mock()
+                with self.assertRaisesRegex(ValueError, "between 0.02 and 2"):
+                    agent._execute_tool(
+                        "press_key", {"keys": "i", "duration_seconds": duration}
+                    )
+                agent._request_approval.assert_not_called()
+
+    def test_denied_key_hold_sends_no_input(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent._request_approval = Mock(return_value=False)
+        agent.wayland_desktop = Mock()
+        result, _ = agent._execute_tool(
+            "press_key", {"keys": "k", "duration_seconds": 1}
+        )
+        self.assertIn("denied", result)
+        agent.wayland_desktop.press_keys.assert_not_called()
+
+    def test_cancelled_x11_hold_releases_all_keys(self) -> None:
+        agent = DesktopAgent.__new__(DesktopAgent)
+        agent._request_approval = Mock(return_value=True)
+        agent.wayland_desktop = None
+        agent.cancel_event = Event()
+        keyboard = Mock()
+        keyboard.keyDown.side_effect = lambda key: (
+            agent.cancel_event.set() if key == "i" else None
+        )
+        with patch.dict(sys.modules, {"pyautogui": keyboard}):
+            with self.assertRaises(QueryCancelled):
+                agent._execute_tool(
+                    "press_key", {"keys": "ctrl+i", "duration_seconds": 1}
+                )
+        self.assertEqual(
+            [call.args[0] for call in keyboard.keyUp.call_args_list], ["i", "ctrl"]
+        )
 
     def test_close_window_requires_screenshot_and_user_approval(self) -> None:
         agent = DesktopAgent.__new__(DesktopAgent)

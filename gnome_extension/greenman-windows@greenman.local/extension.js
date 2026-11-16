@@ -17,6 +17,21 @@ const INTERFACE = `
       <arg type="s" direction="in" name="title"/>
       <arg type="s" direction="out" name="result"/>
     </method>
+    <method name="ActivateOwned">
+      <arg type="s" direction="in" name="title"/>
+      <arg type="u" direction="in" name="pid"/>
+      <arg type="s" direction="out" name="result"/>
+    </method>
+    <method name="IsOwnedFocused">
+      <arg type="s" direction="in" name="title"/>
+      <arg type="u" direction="in" name="pid"/>
+      <arg type="s" direction="out" name="result"/>
+    </method>
+    <method name="OwnedGeometry">
+      <arg type="s" direction="in" name="title"/>
+      <arg type="u" direction="in" name="pid"/>
+      <arg type="s" direction="out" name="result"/>
+    </method>
   </interface>
 </node>`;
 
@@ -67,6 +82,41 @@ export default class GreenManWindows extends Extension {
             return status;
         window.activate(global.get_current_time());
         return 'ok';
+    }
+
+    ActivateOwned(title, pid) {
+        const [window, status] = findUnique(title);
+        if (!window)
+            return status;
+        if (window.get_pid() !== pid)
+            return 'wrong_process';
+        window.activate(global.get_current_time());
+        return 'ok';
+    }
+
+    IsOwnedFocused(title, pid) {
+        const [window, status] = findUnique(title);
+        if (!window)
+            return status;
+        if (window.get_pid() !== pid)
+            return 'wrong_process';
+        return global.display.get_focus_window() === window ? 'ok' : 'not_focused';
+    }
+
+    OwnedGeometry(title, pid) {
+        const [window, status] = findUnique(title);
+        if (!window)
+            return JSON.stringify({status});
+        if (window.get_pid() !== pid)
+            return JSON.stringify({status: 'wrong_process'});
+        const frame = window.get_frame_rect();
+        const monitor = global.display.get_monitor_geometry(window.get_monitor());
+        return JSON.stringify({
+            status: 'ok',
+            frame: [frame.x, frame.y, frame.width, frame.height],
+            monitor: [monitor.x, monitor.y, monitor.width, monitor.height],
+            monitor_count: global.display.get_n_monitors(),
+        });
     }
 
     Close(title) {

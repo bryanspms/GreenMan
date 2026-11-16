@@ -5,12 +5,14 @@ import copy
 import importlib.util
 import io
 import json
+import math
 import os
 import queue
 import re
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import tkinter as tk
 import time
@@ -238,11 +240,15 @@ TOOLS = [
             "description": (
                 "Press a key or keyboard shortcut in the focused application, e.g. "
                 "'ctrl+t', 'ctrl+shift+n', 'enter', 'tab', 'f5'. Use this for "
-                "shortcuts; use type_text only for literal text. Requires user approval."
+                "shortcuts; use type_text only for literal text. Set duration_seconds "
+                "to hold the key for up to 2 seconds. Requires user approval."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"keys": {"type": "string"}},
+                "properties": {
+                    "keys": {"type": "string"},
+                    "duration_seconds": {"type": "number", "minimum": 0.02, "maximum": 2},
+                },
                 "required": ["keys"],
             },
         },
@@ -1320,6 +1326,52 @@ def prepare_screenshot(encoded_image: str) -> tuple[str, tuple[int, int], tuple[
     return base64.b64encode(output.getvalue()).decode("ascii"), source_size, image_size
 
 
+def prepare_pong_screenshot(
+    encoded_image: str,
+    geometry: dict,
+    stream_position: tuple[int, int] | None,
+    stream_size: tuple[int, int] | None,
+) -> str:
+    frame = geometry["frame"]
+    monitor = geometry["monitor"]
+    if stream_size is None or tuple(stream_size) != tuple(monitor[2:]):
+        raise RuntimeError("Share the monitor containing the entire Pong window.")
+    if stream_position is None:
+        if geometry["monitor_count"] != 1:
+            raise RuntimeError(
+                "The portal did not identify the shared monitor. Pong study requires "
+                "monitor position information on multi-monitor desktops."
+            )
+        stream_position = tuple(monitor[:2])
+    if tuple(stream_position) != tuple(monitor[:2]):
+        raise RuntimeError("Share the monitor containing the entire Pong window.")
+    x, y, width, height = frame
+    mx, my, mw, mh = monitor
+    if x < mx or y < my or x + width > mx + mw or y + height > my + mh:
+        raise RuntimeError("Move the entire Pong window onto the shared monitor.")
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(base64.b64decode(encoded_image, validate=True))) as image:
+            left = round((x - mx) * image.width / mw)
+            top = round((y - my) * image.height / mh)
+            right = round((x + width - mx) * image.width / mw)
+            bottom = round((y + height - my) * image.height / mh)
+            if left >= right or top >= bottom:
+                raise RuntimeError("The Pong window is too small to capture.")
+            image = image.crop((left, top, right, bottom)).convert("RGB")
+            scale = MAX_SCREENSHOT_DIMENSION / max(image.size)
+            image = image.resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+            output = io.BytesIO()
+            image.save(output, format="PNG")
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Could not prepare Pong screenshot: {error}") from error
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
 def scale_screenshot_coordinates(
     x: int,
     y: int,
@@ -1457,6 +1509,9 @@ class DesktopAgent:
         self._speech_events: queue.SimpleQueue[tuple[str, Event, object]] = queue.SimpleQueue()
         self._speech_event: Event | None = None
         self._speech_events_after: str | None = None
+        self._pong_process: subprocess.Popen | None = None
+        self._pong_poll_after: str | None = None
+        self._pong_results: queue.SimpleQueue[tuple[int | None, str]] = queue.SimpleQueue()
         self._speech_paused = False
         self._speech_pause_pending = False
         self.speech = SpeechPlayer(
@@ -1495,6 +1550,7 @@ class DesktopAgent:
         self.screenshot_image_size: tuple[int, int] | None = None
         self.remember_desktop_approvals = False
         self.tool_mode = tk.StringVar(value=initial_mode)
+        self.pong_study_enabled = tk.BooleanVar(value=False)
         self.voice_enabled = tk.BooleanVar(value=initial_voice_enabled)
         self.animations_enabled = tk.BooleanVar(
             value=load_animations_preference(self.preferences_file)
@@ -1731,6 +1787,9 @@ class DesktopAgent:
 
     def _close(self) -> None:
         self.speech.stop()
+        if getattr(self, "_pong_poll_after", None) is not None:
+            self.root.after_cancel(self._pong_poll_after)
+            self._pong_poll_after = None
         if self.system_status_after is not None:
             self.root.after_cancel(self.system_status_after)
             self.system_status_after = None
@@ -2220,15 +2279,20 @@ class DesktopAgent:
         self.system_status = tk.StringVar(value="")
         status_row = tk.Frame(self.root, padx=10, pady=5)
         status_row.pack(side=tk.BOTTOM, fill=tk.X, before=attachment_row)
-        self.play_game_button = tk.Button(
-            status_row,
-            text="Play game",
-            command=self._open_game,
-            bg=THEME_COLORS["surface"],
-            fg=THEME_COLORS["text"],
-            activebackground=THEME_COLORS["green_selected"],
+        game_row = tk.Frame(status_row)
+        game_row.pack(side=tk.RIGHT, anchor=tk.N)
+        tk.Label(game_row, text="Play game").pack(side=tk.LEFT, padx=(0, 4))
+        self.game_choice = tk.StringVar(value="None")
+        self.game_selector = ttk.Combobox(
+            game_row, textvariable=self.game_choice,
+            values=("None", "Tic-Tac-Toe", "Pong"), state="readonly", width=12,
         )
-        self.play_game_button.pack(side=tk.RIGHT, anchor=tk.N)
+        self.game_selector.pack(side=tk.LEFT)
+        self.game_selector.bind("<<ComboboxSelected>>", self._on_game_selected)
+        self.pong_study_checkbox = tk.Checkbutton(
+            game_row, text="AI Pong study", variable=self.pong_study_enabled
+        )
+        self.pong_study_checkbox.pack(side=tk.LEFT, padx=(6, 0))
         status_text = tk.Frame(status_row)
         status_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(status_text, textvariable=self.status, anchor=tk.W).pack(fill=tk.X)
@@ -2835,9 +2899,12 @@ class DesktopAgent:
         self.status.set("Could not read the response aloud.")
 
     def _update_send_button(self) -> None:
-        play_game_button = getattr(self, "play_game_button", None)
-        if play_game_button is not None:
-            play_game_button.config(state=tk.DISABLED if self.busy else tk.NORMAL)
+        game_selector = getattr(self, "game_selector", None)
+        if game_selector is not None:
+            game_selector.config(state=tk.DISABLED if self.busy else "readonly")
+        study_checkbox = getattr(self, "pong_study_checkbox", None)
+        if study_checkbox is not None:
+            study_checkbox.config(state=tk.DISABLED if self.busy else tk.NORMAL)
         cancel_event = getattr(self, "cancel_event", None)
         if cancel_event is not None:
             stopping = cancel_event.is_set()
@@ -2874,9 +2941,58 @@ class DesktopAgent:
             return
         self._send()
 
-    def _open_game(self) -> None:
-        if not self.busy:
+    def _on_game_selected(self, _event: tk.Event | None = None) -> None:
+        selected = self.game_choice.get()
+        self.game_choice.set("None")
+        if self.busy or selected == "None":
+            return
+        if selected == "Tic-Tac-Toe":
             TicTacToeDialog(self.root, THEME_COLORS)
+        elif selected == "Pong":
+            if self._pong_process is not None:
+                self.status.set("Pong is already running.")
+                return
+            try:
+                self._pong_process = subprocess.Popen(
+                    [sys.executable, "-u", str(Path(__file__).with_name("pong.py"))],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except OSError as error:
+                self.status.set(f"Could not start Pong: {error}")
+                return
+            threading.Thread(
+                target=self._wait_for_pong,
+                args=(self._pong_process,),
+                daemon=True,
+            ).start()
+            self.status.set("Pong launched in a separate window.")
+            self._pong_poll_after = self.root.after(200, self._poll_pong)
+
+    def _wait_for_pong(self, process: subprocess.Popen) -> None:
+        try:
+            _, error = process.communicate()
+        except OSError as exception:
+            self._pong_results.put((None, str(exception)))
+        else:
+            self._pong_results.put((process.returncode, error))
+
+    def _poll_pong(self) -> None:
+        self._pong_poll_after = None
+        try:
+            returncode, error = self._pong_results.get_nowait()
+        except queue.Empty:
+            self._pong_poll_after = self.root.after(200, self._poll_pong)
+            return
+        self._pong_process = None
+        if returncode != 0:
+            detail = error.strip().splitlines()[-1] if error.strip() else str(returncode)
+            if "No module named 'pygame'" in detail:
+                detail += f" Install pygame using {sys.executable} -m pip install pygame."
+            self.status.set(f"Pong exited with an error: {detail}")
+        else:
+            self.status.set("Pong closed.")
 
     def _stop_query(self) -> None:
         if self.cancel_event is None or self.cancel_event.is_set():
@@ -3343,6 +3459,19 @@ class DesktopAgent:
             self._update_send_button()
             self.status.set("Choose a valid workspace folder before sending a message.")
             return
+        study_var = getattr(self, "pong_study_enabled", None)
+        pong_study = bool(study_var is not None and study_var.get())
+        pong_process = getattr(self, "_pong_process", None)
+        if pong_study:
+            if self.tool_mode.get() != "Desktop control":
+                self.status.set("AI Pong study requires Desktop control mode.")
+                return
+            if pong_process is None or pong_process.poll() is not None:
+                self.status.set("Launch Pong from Green Man before starting AI Pong study.")
+                return
+            if self.wayland_desktop is None:
+                self.status.set("AI Pong study currently requires GNOME on Wayland.")
+                return
         prompt = self.prompt.get("1.0", tk.END).strip()
         if not prompt:
             return
@@ -3424,10 +3553,255 @@ class DesktopAgent:
         model = self.active_model
         mode = self.tool_mode.get()
         threading.Thread(
-            target=self._run_turn,
-            args=(api_url, model, mode, getattr(self, "model_capabilities", None)),
+            target=self._run_pong_study if pong_study else self._run_turn,
+            args=(
+                (api_url, model, pong_process)
+                if pong_study
+                else (api_url, model, mode, getattr(self, "model_capabilities", None))
+            ),
             daemon=True,
         ).start()
+
+    def _run_pong_study(
+        self, configured_url: str, model: str, process: subprocess.Popen
+    ) -> None:
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "press_key",
+                    "description": "Move the right paddle: i up or k down.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "observation": {
+                                "type": "string",
+                                "description": (
+                                    "Describe the ball and right paddle positions "
+                                    "and whether the ball is above or below the paddle."
+                                ),
+                            },
+                            "ball_visible": {"type": "boolean"},
+                            "paddle_visible": {"type": "boolean"},
+                            "keys": {"type": "string", "enum": ["i", "k"]},
+                            "duration_seconds": {
+                                "type": "number", "minimum": 0.02, "maximum": 0.5
+                            },
+                        },
+                        "required": [
+                            "observation", "ball_visible", "paddle_visible",
+                            "keys", "duration_seconds",
+                        ],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "wait",
+                    "description": "Do not move the paddle for a short interval.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "observation": {
+                                "type": "string",
+                                "description": (
+                                    "Describe the ball and right paddle positions "
+                                    "and why waiting is appropriate."
+                                ),
+                            },
+                            "seconds": {"type": "number", "minimum": 0.1, "maximum": 1}
+                        },
+                        "required": ["observation", "seconds"],
+                    },
+                },
+            },
+        ]
+        try:
+            api_url = local_ollama_url(configured_url) + "/api/chat"
+            if not model:
+                raise ValueError("Enter an Ollama model name.")
+            if process is None or process.poll() is not None:
+                raise RuntimeError("The Pong process is no longer running.")
+            shell = getattr(self, "shell_windows", None) or GnomeShellWindows()
+            if not shell.is_available():
+                raise RuntimeError(
+                    "AI Pong study requires the updated Green Man GNOME extension. "
+                    "Install and reload it as described in the README."
+                )
+            shell.check_owned_window("Pong", process.pid)
+            previous = "No move has been sent yet."
+            while True:
+                self._raise_if_cancelled()
+                if process.poll() is not None:
+                    raise RuntimeError("Pong closed; AI Pong study stopped.")
+                shell.activate_owned("Pong", process.pid)
+                if self.cancel_event is not None:
+                    self.cancel_event.wait(0.2)
+                else:
+                    time.sleep(0.2)
+                self._raise_if_cancelled()
+                shell.require_owned_focus("Pong", process.pid)
+                geometry = shell.owned_geometry("Pong", process.pid)
+                encoded = self.wayland_desktop.screenshot(allow_input=True)
+                self._raise_if_cancelled()
+                shell.require_owned_focus("Pong", process.pid)
+                if shell.owned_geometry("Pong", process.pid) != geometry:
+                    raise RuntimeError("Pong moved during capture; restart the study.")
+                stream_position, stream_size = self.wayland_desktop.screenshot_stream_geometry()
+                images = [prepare_pong_screenshot(encoded, geometry, stream_position, stream_size)]
+                self._raise_if_cancelled()
+                response = self._chat(
+                    api_url,
+                    model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are playing Pong using the right paddle. Find "
+                                "the black Pong playing field in the screenshot. The "
+                                "right paddle is the thin white vertical bar touching "
+                                "the RIGHT edge of that field, not the left paddle or "
+                                "the edge of the desktop. The ball is the small white "
+                                "circle. Ignore the score and any desktop transcript. "
+                                "Compare the vertical centres: if the ball is HIGHER "
+                                "than the right paddle, call press_key with i (up); if "
+                                "it is LOWER, call press_key with k (down). Describe "
+                                "what you see in the tool's observation field. Use "
+                                "the ball_visible and paddle_visible fields to report "
+                                "whether you can see both objects. Use duration_seconds "
+                                "0.1 to 0.3, longer for bigger gaps. "
+                                "Call wait when either object is not visible, when "
+                                "the paddle is already level with the ball, or when "
+                                "the ball is moving away. Never claim a "
+                                "move happened; the next screenshot is the only "
+                                "verification. Choose exactly one tool call; do not "
+                                "guess a direction if either object is not visible."
+                            ),
+                        },
+                        {"role": "user", "content": previous, "images": images},
+                    ],
+                    tools=tools,
+                )
+                self._raise_if_cancelled()
+                message = response.get("message")
+                if not isinstance(message, dict):
+                    raise ValueError("Ollama returned a response without a message.")
+                calls = message.get("tool_calls")
+                if not isinstance(calls, list) or len(calls) != 1:
+                    detail = message.get("content", "")
+                    raise RuntimeError(
+                        "AI Pong study stopped: the model did not return exactly "
+                        f"one valid action. Model response: {detail or '(empty)'}"
+                    )
+                call = calls[0]
+                function = call.get("function") if isinstance(call, dict) else None
+                if not isinstance(function, dict):
+                    raise ValueError("The model returned an invalid Pong action.")
+                name = function.get("name")
+                args = function.get("arguments")
+                if not isinstance(args, dict):
+                    raise ValueError("The model returned invalid Pong action arguments.")
+                observation = args.get("observation")
+                if observation is not None and not isinstance(observation, str):
+                    raise ValueError("Pong observation must be text.")
+                observation = " ".join(observation.split())[:500] if observation else ""
+                self.root.after(
+                    0, self._append, "Pong study",
+                    f"Model observation: {observation or '(not provided)'}",
+                )
+                if name == "wait":
+                    seconds = args.get("seconds")
+                    if (
+                        isinstance(seconds, bool)
+                        or not isinstance(seconds, (int, float))
+                        or not math.isfinite(seconds)
+                        or not 0.1 <= seconds <= 1
+                    ):
+                        raise ValueError("Pong wait must be between 0.1 and 1 second.")
+                    if self.cancel_event is not None:
+                        self.cancel_event.wait(seconds)
+                    else:
+                        time.sleep(seconds)
+                    self.root.after(
+                        0, self._append, "Pong study",
+                        f"Waited {seconds:g} seconds; checking the next screenshot.",
+                    )
+                    previous = (
+                        "You waited and the paddle has not moved. Inspect the new "
+                        "screenshot before choosing the next action."
+                    )
+                    continue
+                key = args.get("keys")
+                if name != "press_key" or not isinstance(key, str) or key not in {"i", "k"}:
+                    raise ValueError("Pong study permits only I, K, or wait.")
+                ball_visible = args.get("ball_visible")
+                paddle_visible = args.get("paddle_visible")
+                if not isinstance(ball_visible, bool) or not isinstance(paddle_visible, bool):
+                    raise ValueError(
+                        "Pong move requires boolean ball_visible and paddle_visible "
+                        "observations; no key was sent."
+                    )
+                if not ball_visible or not paddle_visible:
+                    self.root.after(
+                        0, self._append, "Pong study",
+                        "Move skipped: the model could not see both the ball and paddle.",
+                    )
+                    if self.cancel_event is not None:
+                        self.cancel_event.wait(0.2)
+                    else:
+                        time.sleep(0.2)
+                    previous = (
+                        "No key was sent because the ball or right paddle was not "
+                        "visible. Inspect the new screenshot."
+                    )
+                    continue
+                duration = args.get("duration_seconds")
+                if (
+                    isinstance(duration, bool)
+                    or not isinstance(duration, (int, float))
+                    or not math.isfinite(duration)
+                    or not 0.02 <= duration <= 0.5
+                ):
+                    raise ValueError("Pong key hold must be between 0.02 and 0.5 seconds.")
+                approval = {
+                    "keys": key,
+                    "duration_seconds": duration,
+                    "target_window": "Pong",
+                    "target_process_id": process.pid,
+                    "focus_target_after_approval": True,
+                }
+                if not self._request_approval("press_key", approval):
+                    raise RuntimeError("Pong study stopped: the key action was denied.")
+                self._raise_if_cancelled()
+                if process.poll() is not None:
+                    raise RuntimeError("Pong closed before the key action.")
+                shell.activate_owned("Pong", process.pid)
+                if self.cancel_event is not None:
+                    self.cancel_event.wait(0.2)
+                else:
+                    time.sleep(0.2)
+                self._raise_if_cancelled()
+                shell.require_owned_focus("Pong", process.pid)
+                self._raise_if_cancelled()
+                self.wayland_desktop.press_keys(key, duration, self.cancel_event)
+                self._raise_if_cancelled()
+                shell.require_owned_focus("Pong", process.pid)
+                self.root.after(
+                    0, self._append, "Pong study",
+                    f"Sent {key.upper()} for {duration:g} seconds; checking the next screenshot.",
+                )
+                previous = (
+                    f"Sent {key} for {duration:g} seconds to Pong. "
+                    "Inspect the new screenshot; the result is not yet verified."
+                )
+        except (URLError, TimeoutError, ValueError, RuntimeError, OSError) as error:
+            if getattr(self, "cancel_event", None) is not None and self.cancel_event.is_set():
+                self.root.after(0, self._finish, "", None, True)
+            else:
+                self.root.after(0, self._finish, "", str(error))
+        except Exception as error:
+            self.root.after(0, self._finish, "", f"Unexpected error: {error}")
 
     def _start_progress_animation(self) -> None:
         self.progress_position = 0
@@ -4601,6 +4975,15 @@ class DesktopAgent:
 
         target: Path | None = None
         approval_args = args
+        if name == "press_key" and "duration_seconds" in args:
+            duration = args["duration_seconds"]
+            if (
+                isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+                or not math.isfinite(duration)
+                or not 0.02 <= duration <= 2
+            ):
+                raise ValueError("Key hold duration must be between 0.02 and 2 seconds.")
         selected_window: AccessibleWindow | None = None
         selected_application: DesktopApplication | None = None
         if name == "list_windows":
@@ -4838,12 +5221,35 @@ class DesktopAgent:
 
         if name == "press_key":
             keys = str(args["keys"])
+            duration = float(args.get("duration_seconds", 0.02))
+            cancel_event = getattr(self, "cancel_event", None)
+            self._raise_if_cancelled()
             if self.wayland_desktop is not None:
-                self.wayland_desktop.press_keys(keys)
+                if "duration_seconds" in args:
+                    self.wayland_desktop.press_keys(keys, duration, cancel_event)
+                else:
+                    self.wayland_desktop.press_keys(keys)
             else:
                 import pyautogui
 
-                pyautogui.hotkey(*[part.strip() for part in keys.split("+") if part.strip()])
+                parts = [part.strip() for part in keys.split("+") if part.strip()]
+                if "duration_seconds" not in args:
+                    pyautogui.hotkey(*parts)
+                else:
+                    pressed = []
+                    try:
+                        for part in parts:
+                            self._raise_if_cancelled()
+                            pyautogui.keyDown(part)
+                            pressed.append(part)
+                        if cancel_event is not None:
+                            cancel_event.wait(duration)
+                        else:
+                            time.sleep(duration)
+                    finally:
+                        for part in reversed(pressed):
+                            pyautogui.keyUp(part)
+            self._raise_if_cancelled()
             self.screen_observed = False
             self.window_focus_ready = False
             self.window_focus_point = None

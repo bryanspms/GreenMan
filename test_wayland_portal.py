@@ -3,6 +3,7 @@ import subprocess
 import struct
 import unittest
 import asyncio
+import threading
 from unittest.mock import AsyncMock, patch
 
 from dbus_next import Message, MessageType
@@ -97,6 +98,64 @@ class WaylandPortalUtilityTests(unittest.TestCase):
                 ("NotifyKeyboardKeycode", "oa{sv}iu", ["/session/1", {}, KEY_LEFTALT, 0]),
             ],
         )
+
+    def test_cancelled_key_hold_releases_keys(self) -> None:
+        portal = WaylandDesktopPortal.__new__(WaylandDesktopPortal)
+        portal._session_handle = "/session/1"
+        portal._granted_devices = 1
+        portal._ensure_session = AsyncMock()
+        portal._call = AsyncMock()
+        cancelled = threading.Event()
+
+        async def hold_and_cancel() -> None:
+            asyncio.get_running_loop().call_later(0.03, cancelled.set)
+            await portal._press_keys([KEY_LEFTALT], KEY_F4, 2, cancelled)
+
+        asyncio.run(hold_and_cancel())
+        self.assertEqual(
+            [call.args[3][2:] for call in portal._call.await_args_list],
+            [[KEY_LEFTALT, 1], [KEY_F4, 1], [KEY_F4, 0], [KEY_LEFTALT, 0]],
+        )
+
+    def test_cancel_during_session_setup_sends_no_key(self) -> None:
+        portal = WaylandDesktopPortal.__new__(WaylandDesktopPortal)
+        portal._session_handle = "/session/1"
+        portal._granted_devices = 1
+        cancelled = threading.Event()
+        portal._ensure_session = AsyncMock(side_effect=lambda **kwargs: cancelled.set())
+        portal._call = AsyncMock()
+        asyncio.run(portal._press_keys([], KEY_F4, 1, cancelled))
+        portal._call.assert_not_awaited()
+
+    def test_key_hold_waits_for_requested_duration(self) -> None:
+        portal = WaylandDesktopPortal.__new__(WaylandDesktopPortal)
+        portal._session_handle = "/session/1"
+        portal._granted_devices = 1
+        portal._ensure_session = AsyncMock()
+        portal._call = AsyncMock()
+
+        async def hold() -> float:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            await portal._press_keys([], KEY_F4, 0.06)
+            return loop.time() - started
+
+        self.assertGreaterEqual(asyncio.run(hold()), 0.06)
+        self.assertEqual(
+            [call.args[3][2:] for call in portal._call.await_args_list],
+            [[KEY_F4, 1], [KEY_F4, 0]],
+        )
+
+    def test_key_down_error_releases_earlier_modifier(self) -> None:
+        portal = WaylandDesktopPortal.__new__(WaylandDesktopPortal)
+        portal._session_handle = "/session/1"
+        portal._granted_devices = 1
+        portal._ensure_session = AsyncMock()
+        portal._call = AsyncMock(side_effect=[None, RuntimeError("key down failed"), None])
+
+        with self.assertRaisesRegex(RuntimeError, "key down failed"):
+            asyncio.run(portal._press_keys([KEY_LEFTALT], KEY_F4, 0.1))
+        self.assertEqual(portal._call.await_args_list[-1].args[3][2:], [KEY_LEFTALT, 0])
 
     def test_pointer_coordinates_scale_to_logical_size(self) -> None:
         self.assertEqual(
