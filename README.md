@@ -89,6 +89,7 @@ flowchart LR
     Wayland <--> PipeWire
     Status --> UI
 ```
+![GreenMan Architecture](assets/greenManArchitecture.gif)
 
 [Back to TOC](#table-of-contents)
 

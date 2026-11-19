@@ -3840,7 +3840,7 @@ class DesktopAgent:
     def _update_system_status(self) -> None:
         self._refresh_system_status()
         self.system_status_after = self.root.after(
-            2000, self._update_system_status
+            500, self._update_system_status
         )
 
     def _refresh_system_status(self) -> None:
