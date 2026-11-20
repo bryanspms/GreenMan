@@ -38,7 +38,8 @@
 - Optional spoken assistant responses with Markdown formatting support and saved volume, speed, and voice-pitch settings
 - Markdown-formatted response text with bold, italic, code, headings, and blockquotes
 - Collapsible Document Reader section for efficient screen space management
-- Offline tic-tac-toe against Green Man
+- Offline tic-tac-toe against Green Man, plus launchable Pong and Chess games
+- Optional AI study dropdown (None/Pong/Chess) for vision-model game observation
 - Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows, with status cues for loading, waiting, and recording (can be turned off)
 - Optional spoken "Ready" after the Ollama model loads, including at startup
 - Current-step highlighting for multi-line Desktop control requests
@@ -48,6 +49,18 @@
 
 The standalone Pong game is separate from Green Man. See the [Pong guide](./pong.md)
 for installation, controls, rules, and tests.
+
+Chess runs from `chess_game.py` next to `app.py` (legacy names `chess_py.py`/
+`chess.py` are also accepted) and requires the optional `chess` package
+(python-chess) in Green Man's Python environment:
+
+```bash
+.venv/bin/python -m pip install chess
+```
+
+Do not rename the game file to `chess.py` if it shadows the `chess` library
+import; `chess_game.py` is the recommended name. Chess needs no Ollama model
+to play manually; the AI Chess study does.
 
 [Back to TOC](#table-of-contents)
 
@@ -285,9 +298,11 @@ sleep 2
 gnome-extensions enable greenman-windows@greenman.local
 ```
 
-The opt-in **AI Pong study** requires this updated helper to check the Pong
-process and keyboard focus. See [pong.md](./pong.md#desktop-control-experiments)
-for setup and limitations.
+The opt-in **AI study** dropdown (`None`/`Pong`/`Chess`) requires this updated
+helper to check the game process and window focus. Pong study checks the Pong
+process and keyboard focus; Chess study checks the Chess process and window
+focus. See [pong.md](./pong.md#desktop-control-experiments) for the Pong
+setup and limitations.
 
 [Back to TOC](#table-of-contents)
 
@@ -468,13 +483,26 @@ Chat responses support **Markdown formatting** for better readability. The respo
 When responses are **read aloud**, Markdown formatting syntax is automatically stripped to produce clean, natural speech without reading special characters. The formatted display is preserved in the response text area while the voice hears only the plain content.
 
 You can also **collapse the Document Reader** section to save screen space by clicking the collapse button (▼) in the Document Reader header. The collapse state is remembered between sessions.
-Use the **Play game** dropdown below **Clear image** to launch **Tic-Tac-Toe**
-or **Pong**; it resets to **None** after each selection. Tic-Tac-Toe opens a
+Use the **Play game** dropdown below **Clear image** to launch **Tic-Tac-Toe**,
+**Pong**, or **Chess**; it resets to **None** after each selection. Tic-Tac-Toe opens a
 modal window: you play X against a built-in opponent, with **New game** and
 **Close** controls. Pong opens separately and requires the optional Pygame
 package in Green Man's Python environment; see the [Pong guide](./pong.md).
-Neither game needs Ollama. The dropdown is disabled during model loading and
+Chess opens separately in its own window and requires the optional `chess`
+(python-chess) package; Green Man looks for `chess_game.py` next to `app.py`
+(`chess_py.py`/`chess.py` also work) and reports a clear status message if the
+file or dependency is missing. Selecting **Chess** while it is already running
+reports that it is already running. None of the games need Ollama to play
+manually. The dropdown is disabled during model loading and
 active chat requests.
+
+Use the **AI study** dropdown beside it (defaults to **None**) to save space
+while enabling continuous vision-model observation: select **Pong** or **Chess**,
+launch that game from **Play game**, switch to **Desktop control** mode with a
+vision + tool-calling model on GNOME Wayland, type a prompt, and send. Pong
+study drives the right paddle with `i`/`k` key holds; Chess study clicks board
+squares (select the piece, then its destination) and each study logs model
+observations to the transcript with per-action approval.
 Use **Previous Chunk** and **Next Chunk** to stop the current speech and begin
 reading the adjacent chunk. The buttons are disabled at the beginning and end
 of the document, respectively. **Send** is disabled while reading, including
@@ -574,7 +602,7 @@ checked with window listings. The `press_key` tool can request a hold of 0.02
 to 2 seconds instead of a short tap; desktop action approval still applies.
 Input goes to the currently focused window. Ordinary Desktop control is not a
 continuous game-playing mode and remains subject to its tool-round limit. The
-separately enabled AI Pong study uses its own loop. Speed depends on the model running on a GPU.
+separately enabled AI study modes (Pong/Chess) use their own loops. Speed depends on the model running on a GPU.
 Check with `ollama ps`: the PROCESSOR column should show GPU, not `100% CPU`.
 The **Image context** dropdown selects the context size for image requests to
 Green Man's configured Qwen model variants (including attached images and
@@ -611,6 +639,8 @@ used. Smaller models such as `qwen3-vl:4b-instruct` fit fully on an 8 GB GPU.
 | File | Purpose |
 |------|---------|
 | `app.py` | Main window, Ollama chat, tools, approvals, preferences |
+| `chess_game.py` | Standalone Chess game launched from the Play game menu (needs `chess`) |
+| `pong.py` | Standalone Pong game launched from the Play game menu (needs `pygame`) |
 | `face.py` | `GreenManFace`: the animated face (eyes, mouth, eyebrows) |
 | `speech.py` | `SpeechPlayer`: Piper and system speech, and lip-sync loudness analysis |
 | `desktop_applications.py` | Installed application discovery and launching |

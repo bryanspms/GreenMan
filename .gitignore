@@ -1,3 +1,12 @@
 .venv/
 __pycache__/
 *.py[cod]
+app.py.bak
+app.py.fixb.bak
+app.py.noecho.bak
+app.py.option1.bak
+chess_game.py.fixb.bak
+patch_app_option1.py
+patch_app.py
+patch_fix_b.py
+patch_no_echo.py

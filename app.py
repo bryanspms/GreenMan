@@ -1326,29 +1326,32 @@ def prepare_screenshot(encoded_image: str) -> tuple[str, tuple[int, int], tuple[
     return base64.b64encode(output.getvalue()).decode("ascii"), source_size, image_size
 
 
-def prepare_pong_screenshot(
+def prepare_study_screenshot(
     encoded_image: str,
     geometry: dict,
     stream_position: tuple[int, int] | None,
     stream_size: tuple[int, int] | None,
+    label: str = "Pong",
 ) -> str:
+    """Crop a portal screenshot to the study window frame (Pong or Chess)."""
     frame = geometry["frame"]
     monitor = geometry["monitor"]
     if stream_size is None or tuple(stream_size) != tuple(monitor[2:]):
-        raise RuntimeError("Share the monitor containing the entire Pong window.")
+        raise RuntimeError(f"Share the monitor containing the entire {label} window.")
     if stream_position is None:
         if geometry["monitor_count"] != 1:
             raise RuntimeError(
-                "The portal did not identify the shared monitor. Pong study requires "
+                "The portal did not identify the shared monitor. "
+                f"{label} study requires "
                 "monitor position information on multi-monitor desktops."
             )
         stream_position = tuple(monitor[:2])
     if tuple(stream_position) != tuple(monitor[:2]):
-        raise RuntimeError("Share the monitor containing the entire Pong window.")
+        raise RuntimeError(f"Share the monitor containing the entire {label} window.")
     x, y, width, height = frame
     mx, my, mw, mh = monitor
     if x < mx or y < my or x + width > mx + mw or y + height > my + mh:
-        raise RuntimeError("Move the entire Pong window onto the shared monitor.")
+        raise RuntimeError(f"Move the entire {label} window onto the shared monitor.")
     try:
         from PIL import Image
 
@@ -1358,7 +1361,7 @@ def prepare_pong_screenshot(
             right = round((x + width - mx) * image.width / mw)
             bottom = round((y + height - my) * image.height / mh)
             if left >= right or top >= bottom:
-                raise RuntimeError("The Pong window is too small to capture.")
+                raise RuntimeError(f"The {label} window is too small to capture.")
             image = image.crop((left, top, right, bottom)).convert("RGB")
             scale = MAX_SCREENSHOT_DIMENSION / max(image.size)
             image = image.resize(
@@ -1368,8 +1371,30 @@ def prepare_pong_screenshot(
             output = io.BytesIO()
             image.save(output, format="PNG")
     except (OSError, ValueError) as error:
-        raise RuntimeError(f"Could not prepare Pong screenshot: {error}") from error
+        raise RuntimeError(f"Could not prepare {label} screenshot: {error}") from error
     return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def prepare_pong_screenshot(
+    encoded_image: str,
+    geometry: dict,
+    stream_position: tuple[int, int] | None,
+    stream_size: tuple[int, int] | None,
+) -> str:
+    return prepare_study_screenshot(
+        encoded_image, geometry, stream_position, stream_size, "Pong"
+    )
+
+
+def prepare_chess_screenshot(
+    encoded_image: str,
+    geometry: dict,
+    stream_position: tuple[int, int] | None,
+    stream_size: tuple[int, int] | None,
+) -> str:
+    return prepare_study_screenshot(
+        encoded_image, geometry, stream_position, stream_size, "Chess"
+    )
 
 
 def scale_screenshot_coordinates(
@@ -1512,6 +1537,9 @@ class DesktopAgent:
         self._pong_process: subprocess.Popen | None = None
         self._pong_poll_after: str | None = None
         self._pong_results: queue.SimpleQueue[tuple[int | None, str]] = queue.SimpleQueue()
+        self._chess_process: subprocess.Popen | None = None
+        self._chess_poll_after: str | None = None
+        self._chess_results: queue.SimpleQueue[tuple[int | None, str]] = queue.SimpleQueue()
         self._speech_paused = False
         self._speech_pause_pending = False
         self.speech = SpeechPlayer(
@@ -1550,7 +1578,7 @@ class DesktopAgent:
         self.screenshot_image_size: tuple[int, int] | None = None
         self.remember_desktop_approvals = False
         self.tool_mode = tk.StringVar(value=initial_mode)
-        self.pong_study_enabled = tk.BooleanVar(value=False)
+        self.study_choice = tk.StringVar(value="None")
         self.voice_enabled = tk.BooleanVar(value=initial_voice_enabled)
         self.animations_enabled = tk.BooleanVar(
             value=load_animations_preference(self.preferences_file)
@@ -1790,6 +1818,16 @@ class DesktopAgent:
         if getattr(self, "_pong_poll_after", None) is not None:
             self.root.after_cancel(self._pong_poll_after)
             self._pong_poll_after = None
+        if getattr(self, "_chess_poll_after", None) is not None:
+            self.root.after_cancel(self._chess_poll_after)
+            self._chess_poll_after = None
+        for attribute in ("_pong_process", "_chess_process"):
+            process = getattr(self, attribute, None)
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
         if self.system_status_after is not None:
             self.root.after_cancel(self.system_status_after)
             self.system_status_after = None
@@ -2285,14 +2323,16 @@ class DesktopAgent:
         self.game_choice = tk.StringVar(value="None")
         self.game_selector = ttk.Combobox(
             game_row, textvariable=self.game_choice,
-            values=("None", "Tic-Tac-Toe", "Pong"), state="readonly", width=12,
+            values=("None", "Tic-Tac-Toe", "Pong", "Chess"), state="readonly", width=12,
         )
         self.game_selector.pack(side=tk.LEFT)
         self.game_selector.bind("<<ComboboxSelected>>", self._on_game_selected)
-        self.pong_study_checkbox = tk.Checkbutton(
-            game_row, text="AI Pong study", variable=self.pong_study_enabled
+        tk.Label(game_row, text="AI study").pack(side=tk.LEFT, padx=(6, 4))
+        self.study_selector = ttk.Combobox(
+            game_row, textvariable=self.study_choice,
+            values=("None", "Pong", "Chess"), state="readonly", width=8,
         )
-        self.pong_study_checkbox.pack(side=tk.LEFT, padx=(6, 0))
+        self.study_selector.pack(side=tk.LEFT)
         status_text = tk.Frame(status_row)
         status_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(status_text, textvariable=self.status, anchor=tk.W).pack(fill=tk.X)
@@ -2902,9 +2942,9 @@ class DesktopAgent:
         game_selector = getattr(self, "game_selector", None)
         if game_selector is not None:
             game_selector.config(state=tk.DISABLED if self.busy else "readonly")
-        study_checkbox = getattr(self, "pong_study_checkbox", None)
-        if study_checkbox is not None:
-            study_checkbox.config(state=tk.DISABLED if self.busy else tk.NORMAL)
+        study_selector = getattr(self, "study_selector", None)
+        if study_selector is not None:
+            study_selector.config(state=tk.DISABLED if self.busy else "readonly")
         cancel_event = getattr(self, "cancel_event", None)
         if cancel_event is not None:
             stopping = cancel_event.is_set()
@@ -2948,6 +2988,47 @@ class DesktopAgent:
             return
         if selected == "Tic-Tac-Toe":
             TicTacToeDialog(self.root, THEME_COLORS)
+        elif selected == "Chess":
+            # Launch the chess game in a separate process (it owns its own Tk root).
+            if self._chess_process is not None and self._chess_process.poll() is None:
+                self.status.set("Chess is already running.")
+                return
+            self._chess_process = None
+            # Canonical name is chess_game.py; also accept legacy chess_py.py / chess.py.
+            chess_candidates = ("chess_game.py", "chess_py.py", "chess.py")
+            chess_path = next(
+                (
+                    path
+                    for name in chess_candidates
+                    if (path := Path(__file__).with_name(name)).is_file()
+                ),
+                None,
+            )
+            if chess_path is None:
+                self.status.set(
+                    "Could not start Chess: none of "
+                    + ", ".join(chess_candidates)
+                    + f" was found next to {Path(__file__).name}."
+                )
+                return
+            try:
+                self._chess_process = subprocess.Popen(
+                    [sys.executable, "-u", str(chess_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except OSError as error:
+                self._chess_process = None
+                self.status.set(f"Could not start Chess: {error}")
+                return
+            threading.Thread(
+                target=self._wait_for_chess,
+                args=(self._chess_process,),
+                daemon=True,
+            ).start()
+            self.status.set("Chess launched in a separate window.")
+            self._chess_poll_after = self.root.after(200, self._poll_chess)
         elif selected == "Pong":
             if self._pong_process is not None:
                 self.status.set("Pong is already running.")
@@ -2993,6 +3074,30 @@ class DesktopAgent:
             self.status.set(f"Pong exited with an error: {detail}")
         else:
             self.status.set("Pong closed.")
+            
+    def _wait_for_chess(self, process: subprocess.Popen) -> None:
+        try:
+            _, error = process.communicate()
+        except OSError as exception:
+            self._chess_results.put((None, str(exception)))
+        else:
+            self._chess_results.put((process.returncode, error))
+    
+    def _poll_chess(self) -> None:
+        self._chess_poll_after = None
+        try:
+            returncode, error = self._chess_results.get_nowait()
+        except queue.Empty:
+            self._chess_poll_after = self.root.after(200, self._poll_chess)
+            return
+        self._chess_process = None
+        if returncode != 0:
+            detail = error.strip().splitlines()[-1] if error.strip() else str(returncode)
+            if "No module named 'chess'" in detail:
+                detail += f" Install python-chess using {sys.executable} -m pip install chess."
+            self.status.set(f"Chess exited with an error: {detail}")
+        else:
+            self.status.set("Chess closed.")
 
     def _stop_query(self) -> None:
         if self.cancel_event is None or self.cancel_event.is_set():
@@ -3459,8 +3564,10 @@ class DesktopAgent:
             self._update_send_button()
             self.status.set("Choose a valid workspace folder before sending a message.")
             return
-        study_var = getattr(self, "pong_study_enabled", None)
-        pong_study = bool(study_var is not None and study_var.get())
+        study_choice = getattr(self, "study_choice", None)
+        study_selected = study_choice.get() if study_choice is not None else "None"
+        pong_study = study_selected == "Pong"
+        chess_study = study_selected == "Chess"
         pong_process = getattr(self, "_pong_process", None)
         if pong_study:
             if self.tool_mode.get() != "Desktop control":
@@ -3471,6 +3578,17 @@ class DesktopAgent:
                 return
             if self.wayland_desktop is None:
                 self.status.set("AI Pong study currently requires GNOME on Wayland.")
+                return
+        chess_process = getattr(self, "_chess_process", None)
+        if chess_study:
+            if self.tool_mode.get() != "Desktop control":
+                self.status.set("AI Chess study requires Desktop control mode.")
+                return
+            if chess_process is None or chess_process.poll() is not None:
+                self.status.set("Launch Chess from Green Man before starting AI Chess study.")
+                return
+            if self.wayland_desktop is None:
+                self.status.set("AI Chess study currently requires GNOME on Wayland.")
                 return
         prompt = self.prompt.get("1.0", tk.END).strip()
         if not prompt:
@@ -3552,15 +3670,16 @@ class DesktopAgent:
         api_url = self.url_entry.get().strip()
         model = self.active_model
         mode = self.tool_mode.get()
-        threading.Thread(
-            target=self._run_pong_study if pong_study else self._run_turn,
-            args=(
-                (api_url, model, pong_process)
-                if pong_study
-                else (api_url, model, mode, getattr(self, "model_capabilities", None))
-            ),
-            daemon=True,
-        ).start()
+        if pong_study:
+            study_target, study_args = self._run_pong_study, (api_url, model, pong_process)
+        elif chess_study:
+            study_target, study_args = self._run_chess_study, (api_url, model, chess_process, prompt)
+        else:
+            study_target, study_args = (
+                self._run_turn,
+                (api_url, model, mode, getattr(self, "model_capabilities", None)),
+            )
+        threading.Thread(target=study_target, args=study_args, daemon=True).start()
 
     def _run_pong_study(
         self, configured_url: str, model: str, process: subprocess.Popen
@@ -3794,6 +3913,208 @@ class DesktopAgent:
                 previous = (
                     f"Sent {key} for {duration:g} seconds to Pong. "
                     "Inspect the new screenshot; the result is not yet verified."
+                )
+        except (URLError, TimeoutError, ValueError, RuntimeError, OSError) as error:
+            if getattr(self, "cancel_event", None) is not None and self.cancel_event.is_set():
+                self.root.after(0, self._finish, "", None, True)
+            else:
+                self.root.after(0, self._finish, "", str(error))
+        except Exception as error:
+            self.root.after(0, self._finish, "", f"Unexpected error: {error}")
+
+    def _run_chess_study(
+        self,
+        configured_url: str,
+        model: str,
+        process: subprocess.Popen,
+        user_prompt: str = "",
+    ) -> None:
+        """AI Chess study loop using algebraic square coordinates (a1-h8)."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "move_piece",
+                    "description": (
+                        "Move a chess piece by clicking its starting square and "
+                        "then its destination square (e.g. from_square='e7', to_square='e5')."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "observation": {
+                                "type": "string",
+                                "description": "Describe the current board state and your move.",
+                            },
+                            "from_square": {
+                                "type": "string",
+                                "description": "Starting square (a1-h8), e.g. 'e7'.",
+                            },
+                            "to_square": {
+                                "type": "string",
+                                "description": "Destination square (a1-h8), e.g. 'e5'.",
+                            },
+                        },
+                        "required": ["observation", "from_square", "to_square"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "wait",
+                    "description": "Wait briefly when it is not your turn.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "observation": {
+                                "type": "string",
+                                "description": "Describe the board status and why waiting is appropriate.",
+                            },
+                            "seconds": {"type": "number", "minimum": 0.1, "maximum": 1},
+                        },
+                        "required": ["observation", "seconds"],
+                    },
+                },
+            },
+        ]
+
+        def square_to_desktop_xy(square: str, frame: tuple[int, int, int, int]) -> tuple[int, int]:
+            sq = square.strip().lower()
+            if len(sq) != 2 or sq[0] not in "abcdefgh" or sq[1] not in "12345678":
+                raise ValueError(f"Invalid chess square: {square!r}. Must be a1-h8.")
+            col = ord(sq[0]) - ord("a")
+            row = 8 - int(sq[1])
+            frame_x, frame_y, frame_width, frame_height = frame
+            scale = frame_width / 612.0
+            desktop_x = min(frame_x + frame_width - 1, max(frame_x, round(frame_x + (50 + (col + 0.5) * 64) * scale)))
+            desktop_y = min(frame_y + frame_height - 1, max(frame_y, round(frame_y + (150 + (row + 0.5) * 64) * scale)))
+            return desktop_x, desktop_y
+
+        try:
+            api_url = local_ollama_url(configured_url) + "/api/chat"
+            if not model:
+                raise ValueError("Enter an Ollama model name.")
+            if process is None or process.poll() is not None:
+                raise RuntimeError("The Chess process is no longer running.")
+            shell = getattr(self, "shell_windows", None) or GnomeShellWindows()
+            if not shell.is_available():
+                raise RuntimeError("AI Chess study requires the updated Green Man GNOME extension.")
+            shell.check_owned_window("Chess", process.pid)
+
+            system_instructions = (
+                "You are playing chess in the Green Man Chess window. "
+                "The board has a-h columns (left to right) and 1-8 rows (bottom to top). "
+                "Make exactly one tool call per response: call move_piece with "
+                "from_square and to_square (like 'e7' and 'e5') when it is your turn, "
+                "or call wait only when it is the opponent's turn."
+            )
+            if user_prompt.strip():
+                system_instructions += f"\n\nUser instructions:\n{user_prompt.strip()}"
+
+            previous = "No move has been sent yet."
+            while True:
+                self._raise_if_cancelled()
+                if process.poll() is not None:
+                    raise RuntimeError("Chess closed; AI Chess study stopped.")
+                shell.activate_owned("Chess", process.pid)
+                (self.cancel_event.wait(0.2) if self.cancel_event is not None else time.sleep(0.2))
+                self._raise_if_cancelled()
+                shell.require_owned_focus("Chess", process.pid)
+                geometry = shell.owned_geometry("Chess", process.pid)
+                encoded = self.wayland_desktop.screenshot(allow_input=True)
+                self._raise_if_cancelled()
+                shell.require_owned_focus("Chess", process.pid)
+                if shell.owned_geometry("Chess", process.pid) != geometry:
+                    raise RuntimeError("Chess moved during capture; restart the study.")
+                stream_position, stream_size = self.wayland_desktop.screenshot_stream_geometry()
+                images = [prepare_chess_screenshot(encoded, geometry, stream_position, stream_size)]
+                self._raise_if_cancelled()
+                response = self._chat(
+                    api_url,
+                    model,
+                    messages=[
+                        {"role": "system", "content": system_instructions},
+                        {"role": "user", "content": previous, "images": images},
+                    ],
+                    tools=tools,
+                )
+                self._raise_if_cancelled()
+                message = response.get("message")
+                if not isinstance(message, dict):
+                    raise ValueError("Ollama returned a response without a message.")
+
+                debug_payload = {
+                    "content": message.get("content", ""),
+                    "tool_calls": message.get("tool_calls", []),
+                }
+                self.root.after(
+                    0, self._append, "Chess study [DEBUG]", json.dumps(debug_payload, ensure_ascii=False)
+                )
+
+                calls = message.get("tool_calls")
+                if not isinstance(calls, list) or len(calls) != 1:
+                    detail = message.get("content", "")
+                    raise RuntimeError(f"AI Chess study stopped: invalid action. Response: {detail or '(empty)'}")
+                call = calls[0]
+                function = call.get("function") if isinstance(call, dict) else None
+                if not isinstance(function, dict):
+                    raise ValueError("The model returned an invalid Chess action.")
+                name = function.get("name")
+                args = function.get("arguments")
+                if not isinstance(args, dict):
+                    raise ValueError("The model returned invalid Chess action arguments.")
+                observation = args.get("observation")
+                if observation is not None and not isinstance(observation, str):
+                    raise ValueError("Chess observation must be text.")
+                observation = " ".join(observation.split())[:500] if observation else ""
+                self.root.after(
+                    0, self._append, "Chess study", f"Model observation: {observation or '(not provided)'}"
+                )
+                if name == "wait":
+                    seconds = args.get("seconds")
+                    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0.1 <= seconds <= 1:
+                        raise ValueError("Chess wait must be between 0.1 and 1 second.")
+                    (self.cancel_event.wait(seconds) if self.cancel_event is not None else time.sleep(seconds))
+                    self.root.after(0, self._append, "Chess study", f"Waited {seconds:g} seconds; checking next screenshot.")
+                    previous = "You waited. Inspect the new screenshot to see whose turn it is."
+                    continue
+                if name != "move_piece":
+                    raise ValueError("Chess study permits only move_piece or wait.")
+                from_sq = str(args.get("from_square", "")).strip().lower()
+                to_sq = str(args.get("to_square", "")).strip().lower()
+                from_xy = square_to_desktop_xy(from_sq, geometry["frame"])
+                to_xy = square_to_desktop_xy(to_sq, geometry["frame"])
+
+                approval = {
+                    "move": f"{from_sq} -> {to_sq}",
+                    "from_xy": from_xy,
+                    "to_xy": to_xy,
+                    "target_window": "Chess",
+                    "target_process_id": process.pid,
+                    "focus_target_after_approval": True,
+                }
+                if not self._request_approval("click", approval):
+                    raise RuntimeError("Chess study stopped: the move was denied.")
+                self._raise_if_cancelled()
+                if process.poll() is not None:
+                    raise RuntimeError("Chess closed before the move.")
+                shell.activate_owned("Chess", process.pid)
+                (self.cancel_event.wait(0.2) if self.cancel_event is not None else time.sleep(0.2))
+                self._raise_if_cancelled()
+                shell.require_owned_focus("Chess", process.pid)
+                self._raise_if_cancelled()
+                self.wayland_desktop.click(from_xy[0], from_xy[1])
+                (self.cancel_event.wait(0.4) if self.cancel_event is not None else time.sleep(0.4))
+                self._raise_if_cancelled()
+                self.wayland_desktop.click(to_xy[0], to_xy[1])
+                self._raise_if_cancelled()
+                shell.require_owned_focus("Chess", process.pid)
+                self.root.after(0, self._append, "Chess study", f"Moved {from_sq} -> {to_sq}; checking next screenshot.")
+                previous = (
+                    "A move was just attempted. Inspect the new screenshot: "
+                    "if it still says Black's Turn, that move was NOT in the 'Legal moves:' list. "
+                    "You MUST copy one exact pair directly from the 'Legal moves:' list at the bottom of the window."
                 )
         except (URLError, TimeoutError, ValueError, RuntimeError, OSError) as error:
             if getattr(self, "cancel_event", None) is not None and self.cancel_event.is_set():

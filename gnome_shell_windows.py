@@ -93,7 +93,7 @@ class GnomeShellWindows:
             except AttributeError as error:
                 raise RuntimeError(
                     "The Green Man GNOME extension is out of date. Install the "
-                    "updated extension and reload it before using Pong study mode."
+                    "updated extension and reload it before using AI study mode."
                 ) from error
             return await method_call(*args)
         except DBusError as error:
