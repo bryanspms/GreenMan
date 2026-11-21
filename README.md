@@ -24,6 +24,7 @@
 - [Versioning](#versioning)
 - [Contributing](#contributing)
 - [Help Me Help You](#help-me-help-you)
+- [Currently In Development](#currently-in-development)
 - [License](#license)
 - [Attribution](#attribution)
 
@@ -717,6 +718,24 @@ Green Man is independently built and maintained, and developing it takes time—
 </a>
 
 [Back to TOC](#table-of-contents)
+
+
+## <span style="color:#2f6b3f;">Currently In Development</span>
+
+- Turn Green Man into its own dataset generator
+    - Because we already capture screenshots and require explicit user approval before desktop actions, we could add an optional "Record approved actions" toggle. Every time we approve a tool call (or a Pong/Chess study move), Green Man could save the (screenshot, prompt, tool_call) pair to a local JSONL file. This allows us to collect real, high-signal training data just by using the app.   
+
+- Stream responses into sentence-by-sentence speech
+    - Right now, _chat_once sends "stream": False to Ollama, so Green Man waits for the full reply before rendering it to MarkdownText or starting SpeechPlayer. Switching conversational replies to streaming and piping each finished sentence to Piper as it arrives would cut perceived latency dramatically and make the animated face feel even more alive.   
+
+- Add structured evaluation logs for AI Study mode
+    - Since Pong and Chess study modes already log model observations to the transcript, writing a lightweight CSV or JSON summary per session (tracking model name, average tok/s, total turns, and how often the model tries an illegal move in Chess or loses track of the ball in Pong) would let us quantitatively benchmark 4b vs. 8b—or compare a stock model against one we fine-tune ourself.   
+
+- Lightweight local memory across sessions
+    - Currently, View History lives only in memory and clears when the app closes, and New chat resets self.messages. Adding a tiny SQLite store paired with Ollama's local embeddings endpoint would let Green Man recall past facts or preferences on demand without bloating the base system prompt.
+
+[Back to TOC](#table-of-contents)
+
 
 ## <span style="color:#2f6b3f;">License</span>
 

@@ -1562,7 +1562,7 @@ class DesktopAgent:
         self.listening_event: Event | None = None
         self.is_listening = False
         self.system_status_after: str | None = None
-        self.turn_started_at: float | None = None
+        self.turn_started_at = None
         self.previous_cpu_counters: tuple[int, int] | None = None
         self.last_prompt_enter: float | None = None
         self.pending_image: tuple[str, str] | None = None
@@ -1647,7 +1647,7 @@ class DesktopAgent:
         # Don't start speaking yet - wait for the SpeechPlayer's on_start callback
         # which will provide the real envelope data
 
-    def _on_document_speech_actually_started(self, cancel_event: Event, envelope: Optional[list[float]], window_seconds: float) -> None:
+    def _on_document_speech_actually_started(self, cancel_event: Event, envelope: list[float] | None, window_seconds: float) -> None:
         """Called when document reading audio actually starts (from SpeechPlayer.on_start)."""
         # Store the envelope info so the highlighting thread can use it for better timing
         self.document_reader_ui.current_envelope = envelope
@@ -1659,55 +1659,71 @@ class DesktopAgent:
         while not self._speech_events.empty():
             kind, event, payload = self._speech_events.get_nowait()
             
-            if event is not self._speech_event:
-                # Check if this is from document reading
-                if kind == "start" and event is self._document_reading_cancel_event:
-                    # Audio actually started for document reading - clear waiting state and start animations
+            if event is not self._document_reading_cancel_event:
+                if event is not self._speech_event:
+                    # Check if this is from document reading
+                    if kind == "start" and event is self._document_reading_cancel_event:
+                        # Audio actually started for document reading - clear waiting state and start animations
+                        self.face.set_waiting(False)
+                        assert isinstance(payload, tuple)
+                        self.face.start_speaking(*payload)
+                        # Signal the highlighting thread that audio has actually started
+                        if self.document_reader_ui.on_speech_actually_started:
+                            self.document_reader_ui.on_speech_actually_started(event, payload[0], payload[1])
+                    elif kind == "stop" and event is self._document_reading_cancel_event:
+                        # Document reading audio for this chunk finished
+                        # Do NOT clear the document reading event - the reading loop will continue with next chunk
+                        # Only stop face speaking briefly between chunks
+                        self.face.stop_speaking()
+                    elif kind in ("pause", "resume") and event is self._document_reading_cancel_event:
+                        self._speech_paused = kind == "pause"
+                        self.face.set_speech_paused(self._speech_paused)
+                    continue
+                if kind == "start" and not event.is_set():
+                    assert isinstance(payload, tuple)
+                    self.face.start_speaking(*payload)
+                    self._speech_paused = False
+                    self._speech_pause_pending = False
+                    self.pause_speech_button.config(
+                        text="Pause",
+                        state=tk.DISABLED if self._model_load_control_states else tk.NORMAL,
+                    )
+                    self.pause_speech_button.pack(
+                        side=tk.LEFT, padx=(8, 0), after=self.stop_speech_button
+                    )
+                elif kind in ("pause", "resume") and not event.is_set():
+                    self._speech_paused = kind == "pause"
+                    self._speech_pause_pending = False
+                    self.face.set_speech_paused(self._speech_paused)
+                    self.pause_speech_button.config(
+                        text="Play" if self._speech_paused else "Pause",
+                        state=tk.DISABLED if self._model_load_control_states else tk.NORMAL,
+                    )
+                elif kind == "stop":
+                    self.face.stop_speaking()
+                    self._speech_event = None
+                    self.stop_speech_button.config(state=tk.DISABLED)
+                    self.pause_speech_button.pack_forget()
+                    self._speech_paused = False
+                    self._speech_pause_pending = False
+                elif kind == "error" and not event.is_set():
+                    assert isinstance(payload, str)
+                    self._report_voice_error(payload, event)
+            else:
+                if kind == "start" and not event.is_set():
                     self.face.set_waiting(False)
                     assert isinstance(payload, tuple)
                     self.face.start_speaking(*payload)
-                    # Signal the highlighting thread that audio has actually started
                     if self.document_reader_ui.on_speech_actually_started:
                         self.document_reader_ui.on_speech_actually_started(event, payload[0], payload[1])
-                elif kind == "stop" and event is self._document_reading_cancel_event:
-                    # Document reading audio for this chunk finished
-                    # Do NOT clear the document reading event - the reading loop will continue with next chunk
-                    # Only stop face speaking briefly between chunks
-                    self.face.stop_speaking()
-                elif kind in ("pause", "resume") and event is self._document_reading_cancel_event:
+                elif kind in ("pause", "resume") and not event.is_set():
                     self._speech_paused = kind == "pause"
                     self.face.set_speech_paused(self._speech_paused)
-                continue
-            if kind == "start" and not event.is_set():
-                assert isinstance(payload, tuple)
-                self.face.start_speaking(*payload)
-                self._speech_paused = False
-                self._speech_pause_pending = False
-                self.pause_speech_button.config(
-                    text="Pause",
-                    state=tk.DISABLED if self._model_load_control_states else tk.NORMAL,
-                )
-                self.pause_speech_button.pack(
-                    side=tk.LEFT, padx=(8, 0), after=self.stop_speech_button
-                )
-            elif kind in ("pause", "resume") and not event.is_set():
-                self._speech_paused = kind == "pause"
-                self._speech_pause_pending = False
-                self.face.set_speech_paused(self._speech_paused)
-                self.pause_speech_button.config(
-                    text="Play" if self._speech_paused else "Pause",
-                    state=tk.DISABLED if self._model_load_control_states else tk.NORMAL,
-                )
-            elif kind == "stop":
-                self.face.stop_speaking()
-                self._speech_event = None
-                self.stop_speech_button.config(state=tk.DISABLED)
-                self.pause_speech_button.pack_forget()
-                self._speech_paused = False
-                self._speech_pause_pending = False
-            elif kind == "error" and not event.is_set():
-                assert isinstance(payload, str)
-                self._report_voice_error(payload, event)
+                elif kind == "stop":
+                    self.face.stop_speaking()
+                elif kind == "error" and not event.is_set():
+                    assert isinstance(payload, str)
+                    self._report_voice_error(payload, event)
         self._speech_events_after = self.root.after(50, self._poll_speech_events)
 
     def _speak(self, text: str) -> None:
@@ -2930,14 +2946,6 @@ class DesktopAgent:
         elif not self.busy:
             self.status.set("Dictation stopped. Review the text, then send.")
 
-    def _report_voice_error(
-        self, error: str, cancel_event: Event | None = None
-    ) -> None:
-        if cancel_event is not None and cancel_event.is_set():
-            return
-        self._append("Voice error", error)
-        self.status.set("Could not read the response aloud.")
-
     def _update_send_button(self) -> None:
         game_selector = getattr(self, "game_selector", None)
         if game_selector is not None:
@@ -3041,6 +3049,7 @@ class DesktopAgent:
                     text=True,
                 )
             except OSError as error:
+                self._pong_process = None
                 self.status.set(f"Could not start Pong: {error}")
                 return
             threading.Thread(
@@ -4252,6 +4261,8 @@ class DesktopAgent:
                 and re.match(r"(open|launch|start|run)\b", desktop_command)
             )
 
+            turn_metrics = {"prompt_eval_count": 0, "eval_count": 0, "eval_duration": 0}
+
             def desktop_action_still_needed() -> bool:
                 if not is_desktop_action_request(desktop_request):
                     return False
@@ -4397,6 +4408,10 @@ class DesktopAgent:
                     tools=response_tools,
                 )
                 self._raise_if_cancelled()
+                if isinstance(response, dict):
+                    turn_metrics["prompt_eval_count"] += response.get("prompt_eval_count", 0)
+                    turn_metrics["eval_count"] += response.get("eval_count", 0)
+                    turn_metrics["eval_duration"] += response.get("eval_duration", 0)
                 message = response.get("message")
                 if not isinstance(message, dict):
                     raise ValueError("Ollama returned a response without a message.")
@@ -4456,6 +4471,10 @@ class DesktopAgent:
                         tools=initial_response_tools,
                     )
                     self._raise_if_cancelled()
+                    if isinstance(response, dict):
+                        turn_metrics["prompt_eval_count"] += response.get("prompt_eval_count", 0)
+                        turn_metrics["eval_count"] += response.get("eval_count", 0)
+                        turn_metrics["eval_duration"] += response.get("eval_duration", 0)
                     message = response.get("message")
                     if not isinstance(message, dict):
                         raise ValueError("Ollama returned a response without a message.")
@@ -4519,7 +4538,7 @@ class DesktopAgent:
                             "switch to a model that reliably uses tools."
                         )
                         self.messages.append(message)
-                        self.root.after(0, self._finish, answer, None)
+                        self.root.after(0, self._finish, answer, None, False, turn_metrics)
                         return
                     missing_steps = missing_desktop_steps(
                         desktop_request, completed_tools
@@ -4554,6 +4573,8 @@ class DesktopAgent:
                             f"{' -> '.join(tool_trace) or 'none'}. Nothing further "
                             "was sent.",
                             None,
+                            False,
+                            turn_metrics
                         )
                         return
                     if is_text_tool_call(answer):
@@ -4570,6 +4591,10 @@ class DesktopAgent:
                             api_url, model, messages=retry_messages, tools=[]
                         )
                         self._raise_if_cancelled()
+                        if isinstance(response, dict):
+                            turn_metrics["prompt_eval_count"] += response.get("prompt_eval_count", 0)
+                            turn_metrics["eval_count"] += response.get("eval_count", 0)
+                            turn_metrics["eval_duration"] += response.get("eval_duration", 0)
                         message = response.get("message")
                         if not isinstance(message, dict):
                             raise ValueError("Ollama returned a response without a message.")
@@ -4638,7 +4663,7 @@ class DesktopAgent:
                             f"{verification_note} Inspect the verification screenshot "
                             f"at {last_verification_path}. No further click was sent."
                         )
-                    self.root.after(0, self._finish, answer, None)
+                    self.root.after(0, self._finish, answer, None, False, turn_metrics)
                     return
 
                 for tool_call in tool_calls:
@@ -4686,6 +4711,8 @@ class DesktopAgent:
                             "Only one application launch is allowed per turn. "
                             "Use list_windows to verify its result.",
                             None,
+                            False,
+                            turn_metrics
                         )
                         return
                     if (
@@ -4699,6 +4726,8 @@ class DesktopAgent:
                             "Only one named-window close request is allowed per turn. "
                             "Use list_windows to verify its result.",
                             None,
+                            False,
+                            turn_metrics
                         )
                         return
                 self.messages.append(message)
@@ -4744,6 +4773,8 @@ class DesktopAgent:
                                     f"{screenshot_location} and try moving Green Man or "
                                     "using Chrome's close button manually.",
                                     None,
+                                    False,
+                                    turn_metrics
                                 )
                                 return
                         if name == "close_window":
@@ -4874,6 +4905,8 @@ class DesktopAgent:
                                     f"{result} The last tool calls were: "
                                     f"{' -> '.join(tool_trace)}.",
                                     None,
+                                    False,
+                                    turn_metrics
                                 )
                                 return
                             if focus_blocked_out_of_bounds:
@@ -4888,6 +4921,8 @@ class DesktopAgent:
                                         "bring Chrome forward or move Green Man before "
                                         "trying again.",
                                         None,
+                                        False,
+                                        turn_metrics
                                     )
                                     return
                                 image_size = getattr(self, "screenshot_image_size", None)
@@ -4914,6 +4949,8 @@ class DesktopAgent:
                                         "move Green Man or bring Chrome forward, then "
                                         "retry.",
                                         None,
+                                        False,
+                                        turn_metrics
                                     )
                                     return
                                 result = (
@@ -4937,6 +4974,8 @@ class DesktopAgent:
                                         "expose a different part of Chrome, then retry. "
                                         "No desktop input was sent.",
                                         None,
+                                        False,
+                                        turn_metrics
                                     )
                                     return
                                 bounds = getattr(self, "agent_window_bounds", None)
@@ -5070,6 +5109,8 @@ class DesktopAgent:
                                 f"{final_close_result} Inspect the verification "
                                 f"screenshot at {screenshot_location}.",
                                 None,
+                                False,
+                                turn_metrics
                             )
                             return
                         if result.startswith("Clicked approved close button"):
@@ -5095,14 +5136,14 @@ class DesktopAgent:
                 if denied:
                     denial_message = "Stopped because you denied the proposed action."
                     if close_window_sent and close_window_points:
-                            denial_message += (
-                                " The earlier approved close click was sent at screenshot "
-                                f"coordinates x={close_window_points[0][0]}, "
-                                f"y={close_window_points[0][1]}; this does not confirm that "
-                                f"Chrome exited. Inspect {last_verification_path}."
-                            )
+                        denial_message += (
+                            " The earlier approved close click was sent at screenshot "
+                            f"coordinates x={close_window_points[0][0]}, "
+                            f"y={close_window_points[0][1]}; this does not confirm that "
+                            f"Chrome exited. Inspect {last_verification_path}."
+                        )
                     self.root.after(
-                            0, self._finish, denial_message, None
+                        0, self._finish, denial_message, None, False, turn_metrics
                     )
                     return
 
@@ -5856,7 +5897,7 @@ class DesktopAgent:
         dialog.wait_window()
 
     def _finish(
-        self, answer: str, error: str | None, stopped: bool = False
+        self, answer: str, error: str | None, stopped: bool = False, metrics: dict | None = None
     ) -> None:
         stopped = stopped or (
             getattr(self, "cancel_event", None) is not None
@@ -5885,7 +5926,21 @@ class DesktopAgent:
                 self._speak(answer)
         if turn_started_at is not None:
             elapsed_seconds = max(0.0, time.monotonic() - turn_started_at)
-            self._append("Query Duration", format_elapsed_time(elapsed_seconds))
+            time_display = format_elapsed_time(elapsed_seconds)
+            
+            if metrics:
+                prompt_tokens = metrics.get("prompt_eval_count", 0)
+                gen_tokens = metrics.get("eval_count", 0)
+                eval_duration_ns = metrics.get("eval_duration", 0)
+                
+                if gen_tokens > 0 and eval_duration_ns > 0:
+                    tps = gen_tokens / (eval_duration_ns / 1_000_000_000.0)
+                    metrics_str = f" ({prompt_tokens:,} in / {gen_tokens:,} out · {tps:.1f} tok/s)"
+                else:
+                    metrics_str = f" ({prompt_tokens:,} in / {gen_tokens:,} out)"
+                time_display += metrics_str
+                
+            self._append("Query Duration", time_display)
         self.model_selector.config(state="readonly")
         self.url_entry.config(state=tk.NORMAL)
         self.prompt.config(state=tk.NORMAL)
