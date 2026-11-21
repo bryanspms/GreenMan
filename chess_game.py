@@ -69,7 +69,18 @@ class ChessGame(tk.Tk):
             anchor=tk.NW,
             padx=20,
         )
-        self.legal_moves_label.pack(fill=tk.X, pady=(0, 10))
+        self.legal_moves_label.pack(fill=tk.X, pady=(0, 2))
+
+        # Draw / fifty-move info display at the very bottom
+        self.draw_info_label = tk.Label(
+            self,
+            text="",
+            font=("Arial", 10),
+            justify=tk.LEFT,
+            anchor=tk.W,
+            padx=20,
+        )
+        self.draw_info_label.pack(fill=tk.X, pady=(0, 10))
         self.update_board()
 
     def draw_coordinates(self):
@@ -170,6 +181,26 @@ class ChessGame(tk.Tk):
             ))
             moves_text = ", ".join(moves) if moves else "None"
             self.legal_moves_label.config(text=f"Legal moves: {moves_text}")
+
+        # Bottom info: moves remaining until 50-move-rule draw.
+        # NOTE: Stalemate itself has no countdown - it depends on position,
+        # not a clock. The only "moves remaining" draw clock is the
+        # 50-move rule (100 half-moves without a pawn move or capture).
+        if hasattr(self, "draw_info_label"):
+            half = self.engine.halfmove_clock
+            rem_half = 100 - half
+            rem_full = (rem_half + 1) // 2  # ceil(rem_half / 2)
+            info = f"50-move draw in: {rem_full} moves ({rem_half} half-moves)  |  Halfmove clock: {half}/100"
+            if self.engine.can_claim_fifty_moves():
+                info += "  — 50-move draw can be claimed!"
+            if self.engine.is_seventyfive_moves():
+                info += "  — 75-move auto-draw!"
+            # Helpful extra: repetition status (also leads to draw, but no fixed countdown)
+            if self.engine.is_repetition(3):
+                info += "  |  Threefold repetition!"
+            elif self.engine.is_repetition(2):
+                info += "  |  Same position twice (one more = claimable draw)"
+            self.draw_info_label.config(text=info)
 
     def on_canvas_click(self, event):
         """Translate pixel click coordinates into board row/col"""
