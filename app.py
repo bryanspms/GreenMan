@@ -33,6 +33,7 @@ from window_accessibility import AccessibleWindow, AccessibleWindowController
 from document_reader_ui import DocumentReaderUI
 from markdown_text_widget import MarkdownText, strip_markdown
 from tic_tac_toe import TicTacToeDialog
+from dataset_recorder import DatasetRecorder
 
 
 IMAGE_DROP_HINT = "Drop a PNG, JPEG, or WebP image onto the message box to attach it."
@@ -871,6 +872,19 @@ def load_animations_preference(path: Path) -> bool:
     return value if isinstance(value, bool) else True
 
 
+def load_record_actions_preference(path: Path) -> bool:
+    try:
+        preferences = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    value = (
+        preferences.get("record_approved_actions", False)
+        if isinstance(preferences, dict)
+        else False
+    )
+    return value if isinstance(value, bool) else False
+
+
 def load_speech_volume_preference(path: Path) -> int:
     try:
         preferences = json.loads(path.read_text(encoding="utf-8"))
@@ -940,6 +954,7 @@ def save_user_preferences(
     speech_speed: int = 100,
     speech_pitch: int = 100,
     image_context_tokens: int = IMAGE_CONTEXT_TOKENS,
+    record_approved_actions: bool = False,
 ) -> str | None:
     if mode not in TOOL_MODES:
         raise ValueError(f"Unknown assistant mode: {mode}")
@@ -981,6 +996,7 @@ def save_user_preferences(
         "speech_speed": speech_speed,
         "speech_pitch": speech_pitch,
         "image_context_tokens": image_context_tokens,
+        "record_approved_actions": record_approved_actions,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1583,6 +1599,11 @@ class DesktopAgent:
         self.animations_enabled = tk.BooleanVar(
             value=load_animations_preference(self.preferences_file)
         )
+        initial_record_actions = load_record_actions_preference(self.preferences_file)
+        self.record_approved_actions = tk.BooleanVar(value=initial_record_actions)
+        self._record_approved_actions_enabled = initial_record_actions
+        self.dataset_recorder = DatasetRecorder()
+        self.last_screenshot_b64: str | None = None
         self.speech_volume = load_speech_volume_preference(self.preferences_file)
         self.speech_speed = load_speech_speed_preference(self.preferences_file)
         self.speech_pitch = load_speech_pitch_preference(self.preferences_file)
@@ -2196,6 +2217,17 @@ class DesktopAgent:
             )
             button.pack(side=tk.LEFT, padx=(0, 8))
             self.mode_buttons.append(button)
+        self.record_actions_checkbox = tk.Checkbutton(
+            mode_row,
+            text="Record approved actions",
+            variable=self.record_approved_actions,
+            command=self._on_record_actions_toggled,
+            anchor=tk.W,
+            activebackground=THEME_COLORS["surface"],
+            activeforeground=THEME_COLORS["text"],
+            selectcolor=THEME_COLORS["green_selected"],
+        )
+        self.record_actions_checkbox.pack(side=tk.RIGHT)
 
         # Document Reader UI
         self.document_reader_ui = DocumentReaderUI(
@@ -2489,6 +2521,7 @@ class DesktopAgent:
             self.speech_speed,
             self.speech_pitch,
             getattr(self, "image_context_tokens", IMAGE_CONTEXT_TOKENS),
+            self.record_approved_actions.get(),
         )
         if error:
             self.status.set(error)
@@ -2626,6 +2659,7 @@ class DesktopAgent:
                 self.speech_speed,
                 self.speech_pitch,
                 getattr(self, "image_context_tokens", IMAGE_CONTEXT_TOKENS),
+                self.record_approved_actions.get(),
             )
             if error:
                 self.status.set(error)
@@ -3235,6 +3269,54 @@ class DesktopAgent:
                 self.eye_legend.set_animations(self.animations_enabled.get())
         self._save_preferences()
 
+    def _on_record_actions_toggled(self) -> None:
+        enabled = self.record_approved_actions.get()
+        self._record_approved_actions_enabled = enabled
+        if enabled:
+            self.status.set(f"Recording approved actions to {self.dataset_recorder.jsonl_path}")
+        else:
+            self.status.set("Stopped recording approved actions.")
+        self._save_preferences()
+
+    def _latest_user_prompt(self) -> str:
+        synthetic_prefixes = (
+            "The current desktop screenshot is attached.",
+            "This is the verification screenshot captured",
+            "The image is attached.",
+            "This is the screenshot after the named",
+        )
+        for message in reversed(self.messages):
+            if message.get("role") == "user":
+                content = str(message.get("content", "")).strip()
+                if content and not content.startswith(synthetic_prefixes):
+                    return content
+        return ""
+
+    def _record_approved_action(
+        self,
+        *,
+        source: str,
+        prompt: str,
+        tool_name: str,
+        tool_arguments: dict,
+        screenshot_b64: str | None = None,
+        screenshot_size: tuple[int, int] | None = None,
+    ) -> None:
+        if not getattr(self, "_record_approved_actions_enabled", False):
+            return
+        try:
+            self.dataset_recorder.record(
+                source=source,
+                model=self.active_model,
+                prompt=prompt,
+                tool_name=tool_name,
+                tool_arguments=tool_arguments,
+                screenshot_b64=screenshot_b64,
+                screenshot_size=screenshot_size,
+            )
+        except (OSError, ValueError) as error:
+            self.root.after(0, self.status.set, f"Could not record dataset entry: {error}")
+
     def _open_eye_guide(self) -> None:
         dialog = self.eye_legend_dialog
         if dialog is not None and dialog.winfo_exists():
@@ -3273,6 +3355,7 @@ class DesktopAgent:
             self.stop_speech_button,
             self.pause_speech_button,
             self.animations_checkbox,
+            self.record_actions_checkbox,
             self.edit_system_prompt_button,
             self.view_history_button,
             self.clear_attachment_button,
@@ -3491,6 +3574,7 @@ class DesktopAgent:
         self.speech.stop()
         self.messages = [{"role": "system", "content": self.system_prompt}]
         self.screen_observed = False
+        self.last_screenshot_b64 = None
         self.window_focus_ready = False
         self.window_focus_point = None
         self.transcript.config(state=tk.NORMAL)
@@ -3901,6 +3985,13 @@ class DesktopAgent:
                 }
                 if not self._request_approval("press_key", approval):
                     raise RuntimeError("Pong study stopped: the key action was denied.")
+                self._record_approved_action(
+                    source="pong_study",
+                    prompt=previous,
+                    tool_name="press_key",
+                    tool_arguments=args,
+                    screenshot_b64=images[0],
+                )
                 self._raise_if_cancelled()
                 if process.poll() is not None:
                     raise RuntimeError("Pong closed before the key action.")
@@ -4105,6 +4196,18 @@ class DesktopAgent:
                 }
                 if not self._request_approval("click", approval):
                     raise RuntimeError("Chess study stopped: the move was denied.")
+                chess_prompt = (
+                    f"{user_prompt.strip()}\n\n{previous}".strip()
+                    if user_prompt.strip()
+                    else previous
+                )
+                self._record_approved_action(
+                    source="chess_study",
+                    prompt=chess_prompt,
+                    tool_name="move_piece",
+                    tool_arguments=args,
+                    screenshot_b64=images[0],
+                )
                 self._raise_if_cancelled()
                 if process.poll() is not None:
                     raise RuntimeError("Chess closed before the move.")
@@ -5426,8 +5529,17 @@ class DesktopAgent:
                 raise ValueError("The parent directory must already exist.")
             approval_args = {**args, "resolved_path": str(target)}
 
-        if name in APPROVAL_REQUIRED and not self._request_approval(name, approval_args):
-            return "Action denied by the user.", None
+        if name in APPROVAL_REQUIRED:
+            if not self._request_approval(name, approval_args):
+                return "Action denied by the user.", None
+            self._record_approved_action(
+                source=self.tool_mode.get(),
+                prompt=self._latest_user_prompt(),
+                tool_name=name,
+                tool_arguments=args,
+                screenshot_b64=self.last_screenshot_b64 if self.screen_observed else None,
+                screenshot_size=self.screenshot_image_size if self.screen_observed else None,
+            )
 
         if name in {"activate_window", "close_named_window"}:
             assert selected_window is not None
@@ -5546,6 +5658,7 @@ class DesktopAgent:
             encoded, source_size, image_size = prepare_screenshot(encoded)
             self.screenshot_source_size = source_size
             self.screenshot_image_size = image_size
+            self.last_screenshot_b64 = encoded
             self.screen_observed = True
             return (
                 f"Screenshot captured and attached at {image_size[0]}x{image_size[1]}.",

@@ -16,6 +16,7 @@
 - [Microphone Dictation](#microphone-dictation)
 - [Usage](#usage)
   - [Response Formatting with Markdown](#response-formatting-with-markdown)
+  - [Dataset Recording, Export, and Fine-Tuning](#dataset-recording-export-and-fine-tuning)
   - [Animated face](#animated-face)
   - [Performance](#performance)
 - [Project Layout](#project-layout)
@@ -41,6 +42,7 @@
 - Collapsible Document Reader section for efficient screen space management
 - Offline tic-tac-toe against Green Man, plus launchable Pong and Chess games
 - Optional AI study dropdown (None/Pong/Chess) for vision-model game observation
+- Optional **Record approved actions** toggle to save approved `(screenshot, prompt, tool_call)` pairs as a local JSONL dataset, plus `export_dataset.py` for stats, fine-tuning export, and Ollama evaluation
 - Animated Green Man face that looks around, and speaks with a lip-synced mouth and expressive eyebrows, with status cues for loading, waiting, and recording (can be turned off)
 - Optional spoken "Ready" after the Ollama model loads, including at startup
 - Current-step highlighting for multi-line Desktop control requests
@@ -509,6 +511,72 @@ reading the adjacent chunk. The buttons are disabled at the beginning and end
 of the document, respectively. **Send** is disabled while reading, including
 when paused; stop or finish reading before sending a message.
 
+### <span style="color: #2f6b3f;">Dataset Recording, Export, and Fine-Tuning</span>
+
+Green Man can act as its own local dataset generator. Check **Record approved actions** on the right side of the **Assistant mode** bar (off by default, saved in local preferences) to log every user-approved tool call—including Desktop control actions, file writes, shell commands, and AI Pong/Chess study moves.
+
+Each approved action appends one JSON line to:
+
+```text
+~/.local/share/local-green-man-assistant/dataset/approved_actions.jsonl
+```
+
+Matching screenshots (when available) are saved as separate PNG/JPEG files in:
+
+```text
+~/.local/share/local-green-man-assistant/dataset/images/
+```
+
+#### Inspecting, exporting, and benchmarking (`export_dataset.py`)
+
+Use `export_dataset.py` (standard library only) to inspect your collected data, export it for fine-tuning, or benchmark local Ollama models against your approved actions:
+
+1. **View dataset statistics:**
+   ```bash
+   .venv/bin/python export_dataset.py stats
+   ```
+2. **Export for fine-tuning:**
+   - **OpenAI / Unsloth / Qwen-VL / Axolotl format** (with deduplication and a 10% validation split):
+     ```bash
+     .venv/bin/python export_dataset.py export \
+       -f openai \
+       -o finetune.jsonl \
+       --deduplicate \
+       --val-split 0.1
+     ```
+     Add `--embed-images` if your trainer expects inline base64 data URIs instead of local file paths, `--require-image` to skip text-only entries, or `--source chess_study` / `--source pong_study` to export a single domain.
+   - **ShareGPT / LLaMA-Factory format:**
+     ```bash
+     .venv/bin/python export_dataset.py export -f sharegpt -o llamafactory.jsonl
+     ```
+3. **Evaluate a local Ollama model against your recorded actions:**
+   ```bash
+   .venv/bin/python export_dataset.py eval \
+     -m qwen3-vl:8b-instruct \
+     --report eval_8b.json
+   ```
+   This replays each saved `(screenshot, prompt)` pair at `temperature=0.0`, scores tool-name and exact-argument accuracy (ignoring free-text `observation` wording), and reports average tokens/second.
+
+#### Next steps: Fine-tuning a local model with the exported dataset
+
+Once you have curated and exported your dataset (for example, `finetune_train.jsonl` and `finetune_val.jsonl`), you can LoRA fine-tune a local vision-language model such as `Qwen3-VL-4B-Instruct` or `Qwen3-VL-8B-Instruct` and load it back into Ollama:
+
+1. **Audit your data first:** Open `approved_actions.jsonl` (or your exported JSONL) and remove any noisy, accidental, or privacy-sensitive desktop entries before training.
+2. **Train a LoRA adapter:**
+   - **Unsloth / Axolotl:** Point your training config at `finetune_train.jsonl` (exported with `-f openai`) and `finetune_val.jsonl` as the evaluation set.
+   - **LLaMA-Factory:** Export with `-f sharegpt`, register `llamafactory.jsonl` in `dataset_info.json`, and run a multimodal LoRA SFT job.
+3. **Merge and convert to GGUF:** Merge the LoRA weights into the base model and convert/quantize the result (for example, `Q4_K_M` or `Q8_0`) using `llama.cpp` or Unsloth's built-in GGUF exporter.
+4. **Import into Ollama:** Create a `Modelfile` pointing to your GGUF file:
+   ```dockerfile
+   FROM ./greenman-qwen3-vl-8b-q4_k_m.gguf
+   ```
+   Then register and test it:
+   ```bash
+   ollama create greenman-vl:8b -f Modelfile
+   .venv/bin/python export_dataset.py eval -m greenman-vl:8b --report eval_finetuned.json
+   ```
+5. **Use in Green Man:** Reopen the **Ollama model** dropdown in Green Man and select `greenman-vl:8b`.
+
 ### <span style="color: #2f6b3f;">Animated face</span>
 
 The Green Man face at the top left is drawn with Tkinter. By default he blinks and
@@ -640,6 +708,8 @@ used. Smaller models such as `qwen3-vl:4b-instruct` fit fully on an 8 GB GPU.
 | File | Purpose |
 |------|---------|
 | `app.py` | Main window, Ollama chat, tools, approvals, preferences |
+| `dataset_recorder.py` | Thread-safe JSONL and screenshot recorder for approved actions |
+| `export_dataset.py` | CLI tool for dataset stats, fine-tuning export, and Ollama evaluation |
 | `chess_game.py` | Standalone Chess game launched from the Play game menu (needs `chess`) |
 | `pong.py` | Standalone Pong game launched from the Play game menu (needs `pygame`) |
 | `face.py` | `GreenManFace`: the animated face (eyes, mouth, eyebrows) |
@@ -671,6 +741,10 @@ Green Man includes safeguards to keep operations transparent and controlled:
   using `localhost`, `127.0.0.1`, or `::1`.
 - Desktop verification screenshots are also saved locally at
   `~/.cache/greenman/last-desktop-verification.jpg`.
+- When **Record approved actions** is enabled, approved prompts, tool arguments,
+  and screenshots are saved locally under
+  `~/.local/share/local-green-man-assistant/dataset/`. Review and redact
+  sensitive entries before sharing or training on the dataset.
 
 This is not a sandbox. Approved commands can still affect other parts of the system if the user explicitly allows them.
 
@@ -721,9 +795,6 @@ Green Man is independently built and maintained, and developing it takes time—
 
 
 ## <span style="color:#2f6b3f;">Currently In Development</span>
-
-- Turn Green Man into its own dataset generator
-    - Because we already capture screenshots and require explicit user approval before desktop actions, we could add an optional "Record approved actions" toggle. Every time we approve a tool call (or a Pong/Chess study move), Green Man could save the (screenshot, prompt, tool_call) pair to a local JSONL file. This allows us to collect real, high-signal training data just by using the app.   
 
 - Stream responses into sentence-by-sentence speech
     - Right now, _chat_once sends "stream": False to Ollama, so Green Man waits for the full reply before rendering it to MarkdownText or starting SpeechPlayer. Switching conversational replies to streaming and piping each finished sentence to Piper as it arrives would cut perceived latency dramatically and make the animated face feel even more alive.   
